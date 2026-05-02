@@ -180,6 +180,14 @@ file(GLOB_RECURSE SSB64_SRC_WP      "src/wp/*.c"      "src/wp/*.h")
 # Port layer (C++ glue) — excludes port/stubs/ which is compiled as part of ssb64_game
 file(GLOB_RECURSE SSB64_SRC_PORT "port/*.cpp" "port/*.c" "port/*.h")
 list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/stubs/")
+# GLOB is evaluated at configure time; ensure new port sources are picked up for Android.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(_SSB64_CO_ANDROID "${CMAKE_CURRENT_SOURCE_DIR}/port/coroutine_android.cpp")
+    list(FIND SSB64_SRC_PORT "${_SSB64_CO_ANDROID}" _SSB64_CO_ANDROID_IDX)
+    if(_SSB64_CO_ANDROID_IDX LESS 0)
+        list(APPEND SSB64_SRC_PORT "${_SSB64_CO_ANDROID}")
+    endif()
+endif()
 
 # Debug tools (GBI trace + Acmd trace systems)
 file(GLOB SSB64_DEBUG_TOOLS

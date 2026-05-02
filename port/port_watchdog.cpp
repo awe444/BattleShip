@@ -12,7 +12,11 @@
 #include <thread>
 
 #if !defined(_WIN32)
+#if !defined(__ANDROID__) && !defined(ANDROID)
 #include <execinfo.h>
+#else
+#include <unwind.h>
+#endif
 #include <pthread.h>
 #include <signal.h>
 #include <sys/ucontext.h>
@@ -53,18 +57,67 @@ void WriteBoth(const char *buf, size_t n) {
     if (log_fd >= 0) write(log_fd, buf, n);
 }
 
+#if defined(__ANDROID__) || defined(ANDROID)
+struct AndroidUnwindBuf {
+    void **frames;
+    int cap;
+    int count;
+};
+
+static _Unwind_Reason_Code AndroidUnwindCb(_Unwind_Context *ctx, void *arg) {
+    auto *ub = static_cast<AndroidUnwindBuf *>(arg);
+    if (ub->count >= ub->cap) {
+        return _URC_END_OF_STACK;
+    }
+    uintptr_t ip = _Unwind_GetIP(ctx);
+    ub->frames[ub->count++] = reinterpret_cast<void *>(ip);
+    return _URC_NO_REASON;
+}
+
+static int CaptureBacktrace(void **frames, int max) {
+    AndroidUnwindBuf ub = {frames, max, 0};
+    _Unwind_Backtrace(AndroidUnwindCb, &ub);
+    return ub.count;
+}
+
+/* Bionic has no backtrace_symbols_fd; emit raw PCs (async-signal-safe). */
+static void WriteBacktraceSymbols(void **frames, int n) {
+    for (int i = 0; i < n; i++) {
+        char line[96];
+        size_t pos = 0;
+        const char pre[] = "SSB64:  ";
+        for (size_t j = 0; j < sizeof(pre) - 1; j++) {
+            line[pos++] = pre[j];
+        }
+        pos += FormatHex(line + pos, reinterpret_cast<uintptr_t>(frames[i]));
+        line[pos++] = '\n';
+        WriteBoth(line, pos);
+    }
+}
+#else
+static int CaptureBacktrace(void **frames, int max) {
+    return backtrace(frames, max);
+}
+
+static void WriteBacktraceSymbols(void **frames, int n) {
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    int log_fd = port_log_get_fd();
+    if (log_fd >= 0) {
+        backtrace_symbols_fd(frames, n, log_fd);
+    }
+}
+#endif
+
 /* Dump a backtrace to stderr and the log file. Async-signal-safe:
  * backtrace() and backtrace_symbols_fd() are listed as signal-safe on
  * glibc and Darwin; the former uses no heap, the latter writes directly. */
 void DumpBacktraceBoth() {
     constexpr int kMaxFrames = 64;
     void *frames[kMaxFrames];
-    int n = backtrace(frames, kMaxFrames);
+    int n = CaptureBacktrace(frames, kMaxFrames);
     const char msg[] = "SSB64: ---- main-thread backtrace ----\n";
     WriteBoth(msg, sizeof(msg) - 1);
-    backtrace_symbols_fd(frames, n, STDERR_FILENO);
-    int log_fd = port_log_get_fd();
-    if (log_fd >= 0) backtrace_symbols_fd(frames, n, log_fd);
+    WriteBacktraceSymbols(frames, n);
     const char end[] = "SSB64: ---- end backtrace ----\n";
     WriteBoth(end, sizeof(end) - 1);
 }
@@ -218,11 +271,9 @@ void DumpBacktraceFromContext(void *uc_v) {
     void *frames[kMaxFrames];
     int n = 0;
     if (r.valid) n = WalkFPChain(r, frames, kMaxFrames);
-    if (n == 0) n = backtrace(frames, kMaxFrames);
+    if (n == 0) n = CaptureBacktrace(frames, kMaxFrames);
 
-    backtrace_symbols_fd(frames, n, STDERR_FILENO);
-    int log_fd = port_log_get_fd();
-    if (log_fd >= 0) backtrace_symbols_fd(frames, n, log_fd);
+    WriteBacktraceSymbols(frames, n);
 
     const char end[] = "SSB64: ---- end backtrace ----\n";
     WriteBoth(end, sizeof(end) - 1);

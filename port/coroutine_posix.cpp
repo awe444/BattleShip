@@ -5,7 +5,8 @@
  * swapcontext() provides the resume/yield mechanism.
  */
 
-#if !defined(_WIN32)
+/* Android bionic does not provide getcontext/swapcontext/makecontext. */
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(ANDROID)
 
 /*
  * macOS marks the ucontext / swapcontext routines as deprecated and hides
@@ -173,4 +174,4 @@ int port_coroutine_in_coroutine(void)
 	return sCurrentCoroutine != NULL;
 }
 
-#endif /* !_WIN32 */
+#endif /* !_WIN32 && !__ANDROID__ && !ANDROID */
