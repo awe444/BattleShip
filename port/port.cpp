@@ -538,3 +538,14 @@ int main(int argc, char* argv[]) {
 	portRenderDocShutdown();
 	return 0;
 }
+
+#if defined(__ANDROID__)
+/*
+ * SDLActivity loads libBattleShip.so and resolves SDL_main. We use
+ * SDL_MAIN_HANDLED on all platforms so desktop keeps a normal main();
+ * Android still requires this C ABI export.
+ */
+extern "C" int SDL_main(int argc, char* argv[]) {
+	return main(argc, argv);
+}
+#endif
