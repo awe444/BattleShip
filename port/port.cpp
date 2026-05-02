@@ -7,6 +7,7 @@
 #include <libultraship/controller/controldeck/ControlDeck.h>
 #include <fast/Fast3dWindow.h>
 #include <ship/resource/File.h>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -357,6 +358,31 @@ int PortInit(int argc, char* argv[]) {
 			return 1;
 		}
 		port_log("SSB64: game archive registered\n");
+
+		const std::string portO2r = Ship::Context::LocateFileAcrossAppDirs("ssb64.o2r");
+#if defined(__ANDROID__)
+		if (portO2r.empty() || !std::filesystem::exists(portO2r)) {
+			port_log("SSB64: ssb64.o2r missing (required on Android)\n");
+			return 1;
+		}
+		port_log("SSB64: adding port archive -> %s\n", portO2r.c_str());
+		if (!am->AddArchive(portO2r)) {
+			port_log("SSB64: AddArchive failed for %s\n", portO2r.c_str());
+			return 1;
+		}
+		port_log("SSB64: port archive registered\n");
+#else
+		if (!portO2r.empty() && std::filesystem::exists(portO2r)) {
+			port_log("SSB64: adding port archive -> %s\n", portO2r.c_str());
+			if (!am->AddArchive(portO2r)) {
+				port_log("SSB64: AddArchive failed for %s\n", portO2r.c_str());
+				return 1;
+			}
+			port_log("SSB64: port archive registered\n");
+		} else {
+			port_log("SSB64: ssb64.o2r not found — continuing without port-only archive\n");
+		}
+#endif
 	}
 
 	{
