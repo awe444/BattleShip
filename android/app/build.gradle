@@ -44,7 +44,7 @@ android {
         externalNativeBuild {
             cmake {
                  arguments "-DSDL_SHARED=ON", "-DANDROID_STL=c++_static", "-DHAVE_LD_VERSION_SCRIPT=OFF",'-DUSE_OPENGLES=ON'
-                 abiFilters 'arm64-v8a', 'armeabi-v7a'
+                 abiFilters 'arm64-v8a'
             }
         }
         
@@ -142,7 +142,7 @@ android {
 // Pre-generated archives at the BattleShip repo root (optional at dev time).
 tasks.register('copyPrebuiltO2rIntoAssets') {
     doLast {
-        def repoRoot = file("${rootProject.projectDir}/../..")
+        def repoRoot = file("${rootProject.projectDir}/..")
         def dest = file("${project.projectDir}/src/main/assets")
         dest.mkdirs()
         def names = ['BattleShip.o2r', 'f3d.o2r', 'ssb64.o2r']
