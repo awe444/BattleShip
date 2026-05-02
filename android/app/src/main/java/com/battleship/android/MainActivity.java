@@ -59,13 +59,23 @@ public native void setButton(int button, boolean value);
 public native void setCameraState(int axis, float value);
 public native void setAxis(int axis, short value);
 
-// ===== Save dir for the engine (internal only; no extra subfolder) =====
+// ===== Save dir / engine root (must match SDL_AndroidGetExternalStoragePath) =====
 public static String getSaveDir() {
     Context ctx = SDLActivity.getContext();
-    File internal = ctx.getFilesDir(); // /data/data/<pkg>/files
-    if (!internal.exists()) internal.mkdirs();
-    Log.i(TAG, "getSaveDir -> " + internal.getAbsolutePath());
-    return internal.getAbsolutePath();
+    File ext = ctx.getExternalFilesDir(null);
+    File root = ext != null ? ext : ctx.getFilesDir();
+    if (!root.exists()) root.mkdirs();
+    Log.i(TAG, "getSaveDir -> " + root.getAbsolutePath());
+    return root.getAbsolutePath();
+}
+
+/**
+ * Same root as {@code Ship::Context::GetAppDirectoryPath()} / {@code SDL_AndroidGetExternalStoragePath}
+ * on Android. Native code looks here for {@code BattleShip.o2r}, not {@link Context#getFilesDir()}.
+ */
+private File getEngineStorageDir() {
+    File ext = getExternalFilesDir(null);
+    return ext != null ? ext : getFilesDir();
 }
 
 private Uri getUserFolderUri() {
@@ -196,18 +206,20 @@ protected void onCreate(Bundle savedInstanceState) {
 setupControllerOverlay();
     attachController();
 
-    // Seed internal directory with assets if they exist (optional)
+    // Seed engine storage (external app files dir) from APK assets when present
     seedInternalFromAssetsIfPresent();
 
-    File internal = getFilesDir();
+    File engineRoot = getEngineStorageDir();
+    File internalOnly = getFilesDir();
     File external = getExternalFilesDir(null);
-    Log.i(TAG, "Internal root: " + internal);
-    Log.i(TAG, "External root: " + external);
+    Log.i(TAG, "Engine storage (o2r path): " + engineRoot);
+    Log.i(TAG, "Internal files dir: " + internalOnly);
+    Log.i(TAG, "External files dir: " + external);
 
-    // Check for BattleShip.o2r in internal storage first
-    File internalBattleShipO2r = new File(internal, "BattleShip.o2r");
+    // Check for BattleShip.o2r where native code reads it (engine root)
+    File internalBattleShipO2r = new File(engineRoot, "BattleShip.o2r");
 
-    // If not in internal, check if it exists in user's chosen folder and copy it
+    // If not in engine dir, check if it exists in user's chosen folder and copy it
     if (!internalBattleShipO2r.exists() && userFolderUri != null) {
         DocumentFile userRoot = DocumentFile.fromTreeUri(this, userFolderUri);
         if (userRoot != null) {
@@ -237,9 +249,9 @@ setupControllerOverlay();
         syncModsFromUserFolder();
     }
 
-    // Now check if BattleShip.o2r exists in internal storage
+    // Now check if BattleShip.o2r exists in engine storage
     if (!internalBattleShipO2r.exists()) {
-        Log.i(TAG, "BattleShip.o2r not found. Prompting for folder.");
+        Log.i(TAG, "BattleShip.o2r not found under engine storage. Prompting for folder.");
         if (userFolderUri == null) {
             // First time - need to select folder
             promptForUserFolder();
@@ -250,7 +262,7 @@ setupControllerOverlay();
                 DialogActivity.DIALOG_TYPE_FILE_NOT_FOUND);
         }
     } else {
-        Log.i(TAG, "BattleShip.o2r found in internal storage, game should start normally.");
+        Log.i(TAG, "BattleShip.o2r found in engine storage, game should start normally.");
     }
     
     // Signal to C++ that setup is complete
@@ -284,12 +296,46 @@ private boolean assetDirExists(String dir) {
     }
 }
 
+private void migrateLegacyInternalFilesToEngineDir(File engineRoot) {
+    final File legacy = getFilesDir();
+    if (legacy.getAbsolutePath().equals(engineRoot.getAbsolutePath())) {
+        return;
+    }
+    final String[] topFiles = {
+        "BattleShip.o2r", "f3d.o2r", "ssb64.o2r", "gamecontrollerdb.txt", "controllerdb.txt"
+    };
+    for (String name : topFiles) {
+        File src = new File(legacy, name);
+        File dst = new File(engineRoot, name);
+        if (!src.exists() || dst.exists()) {
+            continue;
+        }
+        try (InputStream in = new FileInputStream(src);
+             FileOutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[8192];
+            int r;
+            while ((r = in.read(buf)) != -1) {
+                out.write(buf, 0, r);
+            }
+            out.flush();
+            out.getFD().sync();
+            Log.i(TAG, "Migrated " + name + " from internal files dir -> " + dst.getAbsolutePath());
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to migrate " + name, e);
+        }
+    }
+}
+
 private void seedInternalFromAssetsIfPresent() {
-    File internal = getFilesDir();
+    File engineRoot = getEngineStorageDir();
+    if (!engineRoot.exists()) {
+        engineRoot.mkdirs();
+    }
+    migrateLegacyInternalFilesToEngineDir(engineRoot);
 
     // Prefer the real name: gamecontrollerdb.txt (but accept controllerdb.txt asset if that's what you ship)
-    File gcdb = new File(internal, "gamecontrollerdb.txt");
-    File cdb  = new File(internal, "controllerdb.txt");
+    File gcdb = new File(engineRoot, "gamecontrollerdb.txt");
+    File cdb  = new File(engineRoot, "controllerdb.txt");
     if (!gcdb.exists() && !cdb.exists()) {
         if (assetExists("gamecontrollerdb.txt")) {
             copyAssetFile("gamecontrollerdb.txt", gcdb);
@@ -300,20 +346,20 @@ private void seedInternalFromAssetsIfPresent() {
         }
     }
 
-    File f3d = new File(internal, "f3d.o2r");
+    File f3d = new File(engineRoot, "f3d.o2r");
     if (!f3d.exists() && assetExists("f3d.o2r")) {
         Log.i(TAG, "Copying f3d.o2r from assets to internal");
         copyAssetFile("f3d.o2r", f3d);
     }
 
-    File battleShipPackaged = new File(internal, "BattleShip.o2r");
+    File battleShipPackaged = new File(engineRoot, "BattleShip.o2r");
     if (!battleShipPackaged.exists() && assetExists("BattleShip.o2r")) {
         Log.i(TAG, "Copying BattleShip.o2r from assets to internal");
         copyAssetFile("BattleShip.o2r", battleShipPackaged);
     }
 
-    File ssb64Port = new File(internal, "ssb64.o2r");
-    Log.i(TAG, "Checking ssb64.o2r - exists in internal: " + ssb64Port.exists() + ", exists in assets: " + assetExists("ssb64.o2r"));
+    File ssb64Port = new File(engineRoot, "ssb64.o2r");
+    Log.i(TAG, "Checking ssb64.o2r - exists in engine dir: " + ssb64Port.exists() + ", exists in assets: " + assetExists("ssb64.o2r"));
     if (!ssb64Port.exists() && assetExists("ssb64.o2r")) {
         Log.i(TAG, "Copying ssb64.o2r from assets to internal");
         copyAssetFile("ssb64.o2r", ssb64Port);
@@ -331,7 +377,7 @@ private void seedInternalFromAssetsIfPresent() {
         }
     }
 
-    File modsDir = new File(internal, "mods");
+    File modsDir = new File(engineRoot, "mods");
     if (!modsDir.exists() && assetDirExists("mods")) {
         copyAssetFolderRecursive("mods", modsDir);
     }
@@ -514,7 +560,7 @@ private void handleFolderSelection(Uri treeUri, int returnedFlags) {
     DocumentFile battleShipO2rInUserFolder = userRoot.findFile("BattleShip.o2r");
     if (battleShipO2rInUserFolder != null && battleShipO2rInUserFolder.exists()) {
         // Copy BattleShip.o2r to internal storage
-        File internalBattleShipO2r = new File(getFilesDir(), "BattleShip.o2r");
+        File internalBattleShipO2r = new File(getEngineStorageDir(), "BattleShip.o2r");
         try (InputStream in = getContentResolver().openInputStream(battleShipO2rInUserFolder.getUri());
              FileOutputStream out = new FileOutputStream(internalBattleShipO2r)) {
             byte[] buf = new byte[8192];
@@ -564,20 +610,23 @@ private boolean verifyWritable(DocumentFile dir) {
 // 2) External files dir root (legacy)
 // 3) External files dir /BattleShip (legacy leftover)
 private File chooseBestSourceRoot() {
+    File engine = getEngineStorageDir();
     File internal = getFilesDir();
     File external = getExternalFilesDir(null);
     File legacy = (external != null) ? new File(external, "BattleShip") : null;
 
+    boolean hasEngine = hasAnyTarget(engine);
     boolean hasInternal = hasAnyTarget(internal);
     boolean hasExternal = external != null && hasAnyTarget(external);
     boolean hasLegacy   = legacy != null && hasAnyTarget(legacy);
 
-    Log.i(TAG, "Source check -> internal=" + hasInternal + ", external=" + hasExternal + ", legacy=" + hasLegacy);
+    Log.i(TAG, "Source check -> engine=" + hasEngine + ", internal=" + hasInternal + ", external=" + hasExternal + ", legacy=" + hasLegacy);
 
-    if (hasInternal) return internal;
+    if (hasEngine) return engine;
     if (hasExternal) return external;
+    if (hasInternal) return internal;
     if (hasLegacy)   return legacy;
-    return internal; // default (will report not found later)
+    return engine;
 }
 
 private boolean hasAnyTarget(File root) {
@@ -631,14 +680,14 @@ private boolean copyFromBestSourceToSaf(DocumentFile userRoot) {
     return copied > 0;
 }
 
-// When user picks BattleShip.o2r via SAF, copy into INTERNAL (engine reads from here) AND user folder (for persistence)
+// When user picks BattleShip.o2r via SAF, copy into engine storage (native reads from here) AND user folder (for persistence)
 private void handleRomFileSelection(Uri selectedFileUri) {
     if (selectedFileUri == null) { 
         showToast("No BattleShip.o2r selected."); 
         return; 
     }
 
-    File dest = new File(getFilesDir(), "BattleShip.o2r");
+    File dest = new File(getEngineStorageDir(), "BattleShip.o2r");
     showToast("Copying BattleShip.o2r...");
 
     try (InputStream in = getContentResolver().openInputStream(selectedFileUri);
@@ -652,7 +701,7 @@ private void handleRomFileSelection(Uri selectedFileUri) {
         }
         out.flush();
         out.getFD().sync();
-        Log.i(TAG, "BattleShip.o2r copied to internal (" + total + " bytes): " + dest.getAbsolutePath());
+        Log.i(TAG, "BattleShip.o2r copied to engine storage (" + total + " bytes): " + dest.getAbsolutePath());
 
         // Also copy to user's selected folder if one exists
         if (userFolderUri != null) {

@@ -1708,7 +1708,21 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         if (Build.VERSION.SDK_INT >= 24 /* Android 7.0 (N) */) {
             try {
-                mSurface.setPointerIcon(mCursors.get(cursorID));
+                if (mSingleton == null || mSurface == null) {
+                    return false;
+                }
+                final PointerIcon icon = mCursors.get(cursorID);
+                mSingleton.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            if (mSurface != null) {
+                                mSurface.setPointerIcon(icon);
+                            }
+                        } catch (Exception e) {
+                        }
+                    }
+                });
             } catch (Exception e) {
                 return false;
             }
@@ -1763,7 +1777,21 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         }
         if (Build.VERSION.SDK_INT >= 24 /* Android 7.0 (N) */) {
             try {
-                mSurface.setPointerIcon(PointerIcon.getSystemIcon(SDL.getContext(), cursor_type));
+                if (mSingleton == null || mSurface == null) {
+                    return false;
+                }
+                final int cursorTypeFinal = cursor_type;
+                mSingleton.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            if (mSurface != null) {
+                                mSurface.setPointerIcon(PointerIcon.getSystemIcon(SDL.getContext(), cursorTypeFinal));
+                            }
+                        } catch (Exception e) {
+                        }
+                    }
+                });
             } catch (Exception e) {
                 return false;
             }

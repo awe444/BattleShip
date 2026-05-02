@@ -11,6 +11,7 @@
  * Platform backends:
  *   - Windows: Win32 Fibers (CreateFiber / SwitchToFiber)
  *   - POSIX:   ucontext_t  (makecontext / swapcontext)
+ *   - Android: AArch64 callee-saved + SP swap (same-thread; GLES requires it)
  */
 
 #include <stddef.h>

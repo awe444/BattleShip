@@ -1,72 +1,71 @@
 /**
- * coroutine_android.cpp — pthread + condvar coroutines for Android.
+ * coroutine_android.cpp — same-thread stackful coroutines for Android (arm64).
  *
- * Bionic omits legacy ucontext (getcontext/swapcontext/makecontext). Each
- * logical coroutine runs on a dedicated pthread; resume/yield use a parked /
- * want_run handshake matching "run until yield or entry return".
+ * A pthread-based backend was tried first, but GLES/SDL are tied to the thread
+ * that created the context; running the game coroutine on a worker pthread
+ * caused SIGABRT shortly after boot. This file uses AArch64 callee-saved
+ * register + SP switching (same model as POSIX ucontext / Win32 fibers).
  */
 
 #if defined(__ANDROID__) || defined(ANDROID)
 
+#if !defined(__aarch64__)
+#error "BattleShip Android build only supports arm64-v8a coroutines (see abiFilters)."
+#endif
+
 #include "coroutine.h"
 #include "port_watchdog.h"
 
-#include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <cstddef>
+
 #define MIN_STACK_SIZE (64 * 1024)
 
+/* Offsets must match coroutine_android_aarch64.S */
+typedef struct {
+	uint64_t d8_d9[2];
+	uint64_t d10_d11[2];
+	uint64_t d12_d13[2];
+	uint64_t d14_d15[2];
+	uint64_t x19, x20, x21, x22, x23, x24, x25, x26, x27, x28;
+	uint64_t fp;
+	uint64_t lr;
+	uint64_t sp;
+} PortCoRegs;
+
+static_assert(sizeof(PortCoRegs) == 168, "PortCoRegs size drift — update .S");
+static_assert(offsetof(PortCoRegs, sp) == 160, "PortCoRegs.sp offset drift");
+
 struct PortCoroutine {
-	pthread_mutex_t mu;
-	pthread_cond_t cv_child;
-	pthread_cond_t cv_parent;
-	pthread_t thread;
-	int want_run;
-	int parked;
-	int finished;
-	int shutdown;
-	int thread_started;
+	PortCoRegs fiber_regs;
+	PortCoRegs caller_regs;
 	void (*entry)(void *);
 	void *arg;
+	int finished;
+	char *stack_mem;
 	size_t stack_size;
 };
 
-static __thread PortCoroutine *sCurrentCoroutine = NULL;
+static PortCoroutine *sCurrentCoroutine = NULL;
 
-static void *co_thread_main(void *p)
+extern "C" {
+void port_co_swap(PortCoRegs *save, PortCoRegs *load);
+void port_co_bootstrap(void);
+void port_co_run_entry(PortCoroutine *co);
+}
+
+extern "C" void port_co_run_entry(PortCoroutine *co)
 {
-	PortCoroutine *co = (PortCoroutine *)p;
-
-	pthread_mutex_lock(&co->mu);
-	while (!co->shutdown) {
-		while (!co->want_run && !co->shutdown) {
-			pthread_cond_wait(&co->cv_child, &co->mu);
-		}
-		if (co->shutdown) {
-			break;
-		}
-		co->want_run = 0;
-		co->parked = 0;
-		pthread_cond_signal(&co->cv_parent);
-		pthread_mutex_unlock(&co->mu);
-
-		sCurrentCoroutine = co;
-		co->entry(co->arg);
-		sCurrentCoroutine = NULL;
-
-		pthread_mutex_lock(&co->mu);
-		co->parked = 1;
-		co->finished = 1;
-		pthread_cond_signal(&co->cv_parent);
-		/* entry() runs once per coroutine lifetime (yields are inside it). */
-		while (!co->shutdown) {
-			pthread_cond_wait(&co->cv_child, &co->mu);
-		}
-	}
-	pthread_mutex_unlock(&co->mu);
-	return NULL;
+	co->entry(co->arg);
+	co->finished = 1;
+	sCurrentCoroutine = NULL;
+	port_co_swap(&co->fiber_regs, &co->caller_regs);
+	/* Entry returned without ever yielding — caller context must be valid. */
 }
 
 void port_coroutine_init_main(void)
@@ -85,40 +84,27 @@ PortCoroutine *port_coroutine_create(void (*entry)(void *), void *arg,
 		return NULL;
 	}
 
+	co->stack_mem = (char *)malloc(stack_size);
+	if (co->stack_mem == NULL) {
+		free(co);
+		return NULL;
+	}
+
+	co->stack_size = stack_size;
 	co->entry = entry;
 	co->arg = arg;
-	co->stack_size = stack_size;
-	co->parked = 0;
+	co->finished = 0;
 
-	if (pthread_mutex_init(&co->mu, NULL) != 0) {
-		free(co);
-		return NULL;
-	}
-	if (pthread_cond_init(&co->cv_child, NULL) != 0 ||
-	    pthread_cond_init(&co->cv_parent, NULL) != 0) {
-		pthread_mutex_destroy(&co->mu);
-		free(co);
-		return NULL;
-	}
+	memset(&co->fiber_regs, 0, sizeof(co->fiber_regs));
+	memset(&co->caller_regs, 0, sizeof(co->caller_regs));
 
-	pthread_attr_t attr;
-	pthread_attr_init(&attr);
-	size_t ss = stack_size;
-	if (ss < (size_t)PTHREAD_STACK_MIN) {
-		ss = (size_t)PTHREAD_STACK_MIN;
-	}
-	pthread_attr_setstacksize(&attr, ss);
+	uintptr_t sp =
+	    (uintptr_t)(co->stack_mem + co->stack_size) & ~(uintptr_t)15ULL;
+	sp -= 32; /* ABI red zone / align scratch */
+	co->fiber_regs.sp = (uint64_t)sp;
+	co->fiber_regs.x19 = (uint64_t)co;
+	co->fiber_regs.lr = (uint64_t)(void *)&port_co_bootstrap;
 
-	if (pthread_create(&co->thread, &attr, co_thread_main, co) != 0) {
-		pthread_attr_destroy(&attr);
-		pthread_cond_destroy(&co->cv_parent);
-		pthread_cond_destroy(&co->cv_child);
-		pthread_mutex_destroy(&co->mu);
-		free(co);
-		return NULL;
-	}
-	pthread_attr_destroy(&attr);
-	co->thread_started = 1;
 	return co;
 }
 
@@ -127,39 +113,23 @@ void port_coroutine_destroy(PortCoroutine *co)
 	if (co == NULL) {
 		return;
 	}
-
-	if (co->thread_started) {
-		pthread_mutex_lock(&co->mu);
-		co->shutdown = 1;
-		co->want_run = 1;
-		pthread_cond_signal(&co->cv_child);
-		pthread_mutex_unlock(&co->mu);
-		pthread_join(co->thread, NULL);
+	if (co->stack_mem != NULL) {
+		free(co->stack_mem);
+		co->stack_mem = NULL;
 	}
-
-	pthread_cond_destroy(&co->cv_parent);
-	pthread_cond_destroy(&co->cv_child);
-	pthread_mutex_destroy(&co->mu);
 	free(co);
 }
 
 void port_coroutine_resume(PortCoroutine *co)
 {
-	if (co == NULL) {
+	if (co == NULL || co->finished) {
 		return;
 	}
 
-	pthread_mutex_lock(&co->mu);
-	if (co->finished) {
-		pthread_mutex_unlock(&co->mu);
-		return;
-	}
-	co->want_run = 1;
-	pthread_cond_signal(&co->cv_child);
-	while (!co->parked) {
-		pthread_cond_wait(&co->cv_parent, &co->mu);
-	}
-	pthread_mutex_unlock(&co->mu);
+	PortCoroutine *prev = sCurrentCoroutine;
+	sCurrentCoroutine = co;
+	port_co_swap(&co->caller_regs, &co->fiber_regs);
+	sCurrentCoroutine = prev;
 }
 
 void port_coroutine_yield(void)
@@ -173,20 +143,8 @@ void port_coroutine_yield(void)
 
 	port_watchdog_note_yield();
 
-	pthread_mutex_lock(&co->mu);
-	co->parked = 1;
-	pthread_cond_signal(&co->cv_parent);
-	while (!co->want_run && !co->shutdown) {
-		pthread_cond_wait(&co->cv_child, &co->mu);
-	}
-	if (co->shutdown) {
-		pthread_mutex_unlock(&co->mu);
-		return;
-	}
-	co->want_run = 0;
-	co->parked = 0;
-	pthread_cond_signal(&co->cv_parent);
-	pthread_mutex_unlock(&co->mu);
+	sCurrentCoroutine = NULL;
+	port_co_swap(&co->fiber_regs, &co->caller_regs);
 }
 
 int port_coroutine_is_finished(PortCoroutine *co)

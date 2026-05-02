@@ -182,11 +182,15 @@ file(GLOB_RECURSE SSB64_SRC_PORT "port/*.cpp" "port/*.c" "port/*.h")
 list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/stubs/")
 # GLOB is evaluated at configure time; ensure new port sources are picked up for Android.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    enable_language(ASM)
     set(_SSB64_CO_ANDROID "${CMAKE_CURRENT_SOURCE_DIR}/port/coroutine_android.cpp")
     list(FIND SSB64_SRC_PORT "${_SSB64_CO_ANDROID}" _SSB64_CO_ANDROID_IDX)
     if(_SSB64_CO_ANDROID_IDX LESS 0)
         list(APPEND SSB64_SRC_PORT "${_SSB64_CO_ANDROID}")
     endif()
+    # abiFilters is arm64-v8a only; AArch64 stack swap (requires ASM language).
+    list(APPEND SSB64_SRC_PORT
+        "${CMAKE_CURRENT_SOURCE_DIR}/port/coroutine_android_aarch64.S")
 endif()
 
 # Debug tools (GBI trace + Acmd trace systems)
