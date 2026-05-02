@@ -43,6 +43,10 @@
 #include "port_log.h"
 #include "renderdoc_trigger.h"
 
+#if defined(__ANDROID__)
+#include <SDL2/SDL.h>
+#endif
+
 /* Backbuffer screenshot capture — implemented in libultraship's DX11 backend.
  * Returns 1 on success, 0 on failure (silent). Never throws. */
 extern "C" int portFastCaptureBackbufferPNG(const char *path);
@@ -211,6 +215,33 @@ extern "C" void port_submit_display_list(void *dl)
 /*  Public API                                                               */
 /* ========================================================================= */
 
+#if defined(__ANDROID__)
+/**
+ * SDL's Android HID path calls into Java (Log / UsbManager / etc.). ART
+ * validates JNI string arguments against the native stack's JNI transition
+ * frames; our game and service threads run on manually switched AArch64
+ * stacks, so the first SDL_Init(SDL_INIT_GAMECONTROLLER) must happen on
+ * the real SDL main stack before any port_coroutine_resume.
+ */
+static void port_android_early_init_sdl_gamecontroller(void)
+{
+	SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
+	std::string controllerDb = Ship::Context::LocateFileAcrossAppDirs("gamecontrollerdb.txt");
+	int mappingsAdded = SDL_GameControllerAddMappingsFromFile(controllerDb.c_str());
+	if (mappingsAdded >= 0) {
+		port_log("SSB64: Android pre-init gamecontrollerdb \"%s\" (%d)\n",
+		         controllerDb.c_str(), mappingsAdded);
+	} else {
+		port_log("SSB64: Android pre-init gamecontrollerdb failed \"%s\" (%s)\n",
+		         controllerDb.c_str(), SDL_GetError());
+	}
+	if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) {
+		port_log("SSB64: FATAL — Android pre-init SDL_Init(GAMECONTROLLER): %s\n",
+		         SDL_GetError());
+	}
+}
+#endif
+
 void PortGameInit(void)
 {
 	port_log("SSB64: PortGameInit — initializing coroutine system\n");
@@ -218,6 +249,10 @@ void PortGameInit(void)
 	/* Convert the main thread to a fiber so it can participate in
 	 * coroutine switching. */
 	port_coroutine_init_main();
+
+#if defined(__ANDROID__)
+	port_android_early_init_sdl_gamecontroller();
+#endif
 
 	/* Create the game coroutine with a large stack (1 MB).
 	 * This will host the entire game: syMainLoop -> Thread 1 -> Thread 5

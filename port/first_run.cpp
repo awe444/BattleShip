@@ -305,6 +305,20 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
         return { true, targetPath.string(), {}, {} };
     }
 
+#if defined(__ANDROID__)
+    port_log("first_run: %s missing — Android has no bundled Torch; supply a PC-built archive.\n",
+             target_o2r_path.c_str());
+    if (!silent) {
+        const std::string msg =
+            "BattleShip.o2r was not found.\n\n"
+            "Android builds cannot run Torch. Generate BattleShip.o2r on a PC "
+            "(desktop build: ExtractAssets), then install it into the app "
+            "storage or pick it with the folder/file prompts.";
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "BattleShip.o2r missing", msg.c_str(), nullptr);
+    }
+    return { false, {}, "BattleShip.o2r missing (Android)", {} };
+#else
+
     port_log("first_run: %s missing — running asset extraction\n",
              target_o2r_path.c_str());
 
@@ -424,9 +438,20 @@ ExtractionResult ExtractAssetsIfNeeded(const std::string& target_o2r_path, bool 
 
     port_log("first_run: extracted BattleShip.o2r -> %s\n", targetPath.string().c_str());
     return { true, targetPath.string(), {}, logPath };
+#endif
 }
 
 bool RunFirstRunWizard(const std::string& target_o2r_path) {
+#if defined(__ANDROID__)
+    port_log("first_run: RunFirstRunWizard is unavailable on Android (no Torch)\n");
+    const std::string msg =
+        "BattleShip.o2r is missing.\n\n"
+        "Use the Android file prompts, or copy a PC-generated BattleShip.o2r "
+        "into the app's files directory.";
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "BattleShip.o2r missing", msg.c_str(), nullptr);
+    return false;
+#else
+
     port_log("first_run: launching ImGui wizard\n");
 
     auto context = Ship::Context::GetInstance();
@@ -647,6 +672,7 @@ bool RunFirstRunWizard(const std::string& target_o2r_path) {
     }
     port_log("first_run: wizard completed successfully\n");
     return true;
+#endif
 }
 
 } // namespace ssb64
