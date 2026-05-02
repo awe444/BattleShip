@@ -8,22 +8,14 @@
     native <methods>;
 }
 
-# Keep MainActivity and its native methods
+# Keep MainActivity and JNI-visible static entry points
 -keep class com.battleship.android.MainActivity {
     public static java.lang.String getSaveDir();
     public static void waitForSetupFromNative();
-    public native void attachController();
-    public native void detachController();
-    public native void setButton(int, boolean);
-    public native void setCameraState(int, float);
-    public native void setAxis(int, short);
 }
 
 # Keep DialogActivity
 -keep class com.battleship.android.DialogActivity { *; }
-
-# Keep ControllerButtons constants
--keep class com.battleship.android.ControllerButtons { *; }
 
 # Keep DocumentFile for SAF
 -keep class androidx.documentfile.provider.DocumentFile { *; }
