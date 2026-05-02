@@ -349,12 +349,20 @@ endif()
 # Executable (desktop) or shared library (Android) — port C++ + decomp objects
 ################################################################################
 
+# Android-only JNI (kept in port/ so libultraship can stay a third-party submodule).
+set(SSB64_ANDROID_JNI_SOURCES "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
-    add_library(${PROJECT_NAME} SHARED ${SSB64_SRC_PORT} ${SSB64_DEBUG_TOOLS} $<TARGET_OBJECTS:ssb64_game>)
+    list(APPEND SSB64_ANDROID_JNI_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/port/android/android_jni.cpp")
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    add_library(${PROJECT_NAME} SHARED ${SSB64_SRC_PORT} ${SSB64_DEBUG_TOOLS} ${SSB64_ANDROID_JNI_SOURCES}
+                $<TARGET_OBJECTS:ssb64_game>)
     # SDL Java bootstrap loads libBattleShip.so (see android MainActivity).
     set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "BattleShip")
 else()
-    add_executable(${PROJECT_NAME} ${SSB64_SRC_PORT} ${SSB64_DEBUG_TOOLS} $<TARGET_OBJECTS:ssb64_game>)
+    add_executable(${PROJECT_NAME} ${SSB64_SRC_PORT} ${SSB64_DEBUG_TOOLS} ${SSB64_ANDROID_JNI_SOURCES}
+                   $<TARGET_OBJECTS:ssb64_game>)
     # User-facing binary name. The CMake target keeps the historical
     # `ssb64` identifier (matches the repo, build dirs, internal symbols),
     # but the produced executable is `BattleShip` / `BattleShip.exe`.
