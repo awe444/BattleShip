@@ -254,7 +254,7 @@ def get_main_motion_name(file_id):
 def parse_reloc_data_header(header_path):
     """Parse include/reloc_data.h to build file_id -> (symbol_name, clean_name) map."""
     id_to_name = {}
-    pattern = re.compile(r'#define\s+(ll(\w+)FileID)\s+\(\(intptr_t\)(0x[0-9a-fA-F]+)\)')
+    pattern = re.compile(r'#define\s+(ll(\w+)FileID)\s+\(\(intptr_t\)(0x[0-9a-fA-F]+|[0-9]+)\)')
 
     with open(header_path, 'r') as f:
         for line in f:
@@ -262,7 +262,8 @@ def parse_reloc_data_header(header_path):
             if m:
                 symbol = m.group(1)   # e.g. llMNCommonFileID
                 name = m.group(2)     # e.g. MNCommon
-                file_id = int(m.group(3), 16)
+                raw = m.group(3)
+                file_id = int(raw, 16) if raw.lower().startswith("0x") else int(raw, 10)
                 id_to_name[file_id] = (symbol, name)
 
     return id_to_name
