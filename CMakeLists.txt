@@ -19,6 +19,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# CMake 3.28+ may scan C++20 sources for import/module with Ninja+Clang, which requires
+# clang-scan-deps beside the compiler. We do not use C++ modules; disable scanning so
+# Clang toolchains without clang-scan-deps still configure and build.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+    set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build." FORCE)
 endif()
@@ -73,6 +80,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
         SOURCE_DIR ${CMAKE_SOURCE_DIR}/torch
         CMAKE_ARGS
             -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/torch-install
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
             -DUSE_STANDALONE=ON
             -DBUILD_STORMLIB=OFF
             -DBUILD_SM64=OFF
@@ -350,15 +358,20 @@ if (NOT MSVC)
         -Werror=return-type
     )
     # Clang-only diagnostics. -Wincompatible-library-redeclaration is
-    # Clang-specific; -Wreturn-mismatch / -Wconstant-conversion /
-    # -Wtautological-constant-out-of-range-compare exist in modern Clang
-    # but only landed in GCC 14+ (or never).
+    # Clang-specific. -Wconstant-conversion / -Wtautological-constant-out-of-range-compare
+    # are Clang flags GCC may not accept on older releases.
+    #
+    # -Wreturn-mismatch is a GCC 14+ diagnostic; Clang has no -Werror=return-mismatch
+    # spelling (it warns as an unknown option), so apply that promotion on GCC only.
     if (CMAKE_C_COMPILER_ID MATCHES "Clang")
         target_compile_options(ssb64_game PRIVATE
             -Werror=incompatible-library-redeclaration
-            -Werror=return-mismatch
             -Wno-constant-conversion
             -Wno-tautological-constant-out-of-range-compare
+        )
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "14")
+        target_compile_options(ssb64_game PRIVATE
+            -Werror=return-mismatch
         )
     endif()
 endif()

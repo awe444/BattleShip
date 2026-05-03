@@ -68,6 +68,21 @@ def collect_src_symbols() -> set[str]:
     return symbols
 
 
+def intptr_emit_value(literal: str) -> str:
+    """Normalize a symbols-table value to a decimal string for ((intptr_t)VALUE).
+
+    The table uses ``0x…`` hex or plain decimal. Emitting decimal avoids a Clang
+    18.x frontend crash seen with some ``((intptr_t)0x…)`` forms inside large
+    brace initializers after macro expansion from this header.
+    """
+    s = literal.strip()
+    if s.startswith(("0x", "0X")):
+        return str(int(s, 16))
+    if len(s) > 1 and s[0] == "0" and s[1] in "01234567":
+        return str(int(s, 8))
+    return str(int(s, 10))
+
+
 def parse_symbol_values() -> dict[str, str]:
     """Parse tools/reloc_data_symbols.us.txt into {name: value_literal}.
 
@@ -137,10 +152,10 @@ def write_header(values: dict[str, str], extra_stubs: set[str]) -> None:
         "",
     ]
 
-    # Use `((intptr_t)<literal>)` for every entry so downstream tools
-    # (tools/generate_yamls.py) see a consistent regex-friendly format.
+    # Use `((intptr_t)<decimal>)` for every entry so downstream tools
+    # (tools/generate_yamls.py) can parse FileID lines and Clang stays stable.
     for name in table_names:
-        lines.append(f"#define {name} ((intptr_t){values[name]})")
+        lines.append(f"#define {name} ((intptr_t){intptr_emit_value(values[name])})")
 
     if stub_names:
         lines.append("")
