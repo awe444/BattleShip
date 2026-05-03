@@ -9,6 +9,7 @@
 #ifdef PORT
 #include "port_log.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #ifdef _MSC_VER
 #include <excpt.h>
@@ -78,6 +79,7 @@ static s32 sGCDLPointerWarningCount;
 static s32 sGCMObjRenderDiagCount;
 
 extern bool portRelocDescribePointer(const void *ptr, uintptr_t *out_base, size_t *out_size, u32 *out_file_id, const char **out_path);
+extern void *portRelocTryResolvePointer(uint32_t token);
 extern char *getenv(const char *name);
 extern int atoi(const char *nptr);
 extern unsigned long strtoul(const char *nptr, char **endptr, int base);
@@ -315,6 +317,45 @@ static void* gcTryResolveTokenArrayEntry(const char *issue, DObj *dobj, MObj *mo
         gcLogMObjResolveWarning(issue, dobj, mobj, array_token, tokens, index, *out_token);
     }
     return resolved;
+}
+
+/*
+ * DObj::dv is a void* / Gfx* union slot. Normal setup stores a full host Gfx*
+ * (LP64). Some paths can leave a bare 32-bit relocation token or a stray GBI
+ * word (e.g. G_ENDDL = 0xDF000000) in the low half — passing that to Fast3D
+ * makes the interpreter treat it as a display-list pointer and SIGSEGV.
+ */
+static Gfx *gcResolveDObjDisplayList(const DObj *dobj)
+{
+    uintptr_t raw;
+    void *resolved;
+
+    if (dobj == NULL)
+    {
+        return NULL;
+    }
+    raw = (uintptr_t)dobj->dv;
+    if (raw == 0)
+    {
+        return NULL;
+    }
+#if UINTPTR_MAX > 0xFFFFFFFFu
+    if (raw > 0xFFFFFFFFu)
+    {
+        return dobj->dl;
+    }
+#endif
+    resolved = portRelocTryResolvePointer((uint32_t)raw);
+    if (resolved != NULL)
+    {
+        return (Gfx *)resolved;
+    }
+    /* Not a valid pointer-table token; reject G_ENDDL-shaped garbage. */
+    if ((u8)((raw >> 24) & 0xFF) == 0xDF)
+    {
+        return NULL;
+    }
+    return dobj->dl;
 }
 
 static void gcLogSuspiciousDLPointer(const char *issue, DObj *dobj, unsigned long long draw_dl_raw, s32 list_id, DObjDLLink *dl_link)
@@ -1921,8 +1962,17 @@ void gcDrawDObjForGObj(GObj *gobj, Gfx **dl_head)
             gcDrawMObjForDObj(dobj, dl_head);
 #ifdef PORT
             gcLogSuspiciousDLPointer("dobj", dobj, (unsigned long long)dobj->dl, -1, NULL);
-#endif
+            {
+                Gfx *draw_dl = gcResolveDObjDisplayList(dobj);
+
+                if (draw_dl != NULL)
+                {
+                    gSPDisplayList(dl_head[0]++, draw_dl);
+                }
+            }
+#else
             gSPDisplayList(dl_head[0]++, dobj->dl);
+#endif
 
             if (num != 0)
             {
@@ -1976,8 +2026,17 @@ void gcDrawDObjTree(DObj *this_dobj)
             gcDrawMObjForDObj(this_dobj, gSYTaskmanDLHeads);
 #ifdef PORT
             gcLogSuspiciousDLPointer("tree-dobj", this_dobj, (unsigned long long)this_dobj->dl, 0, NULL);
-#endif
+            {
+                Gfx *draw_dl = gcResolveDObjDisplayList(this_dobj);
+
+                if (draw_dl != NULL)
+                {
+                    gSPDisplayList(gSYTaskmanDLHeads[0]++, draw_dl);
+                }
+            }
+#else
             gSPDisplayList(gSYTaskmanDLHeads[0]++, this_dobj->dl);
+#endif
         }
         if (this_dobj->child != NULL)
         { 
