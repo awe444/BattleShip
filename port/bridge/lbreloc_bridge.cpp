@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -229,6 +230,232 @@ static std::shared_ptr<RelocFile> portLoadRelocResource(u32 file_id)
 
 	return relocFile;
 }
+
+extern "C" bool portRelocFindContainingFile(const void *ptr, uintptr_t *out_base, size_t *out_size);
+
+namespace {
+
+/* Mirror PORT Gfx layout: two uintptr_t words per command. */
+struct PortGfxCmd {
+	uintptr_t w0;
+	uintptr_t w1;
+};
+
+static constexpr uint32_t kF3dex2VtxOp = 0x01U;
+static constexpr uint32_t kF3dex2DlOp = 0xDEU;
+static constexpr uint32_t kF3dex2EndDlOp = 0xDFU;
+
+static thread_local size_t sGfxDlWalkBudget;
+
+static bool vtxFirstLooksSane(const uint32_t *v)
+{
+	int16_t ob0 = (int16_t)((v[0] >> 16) & 0xFFFF);
+	int16_t ob1 = (int16_t)(v[0] & 0xFFFF);
+	int16_t ob2 = (int16_t)((v[1] >> 16) & 0xFFFF);
+	uint16_t flag = (uint16_t)(v[1] & 0xFFFF);
+	const int kMaxCoord = 16384;
+
+	if (ob0 < -kMaxCoord || ob0 > kMaxCoord) return false;
+	if (ob1 < -kMaxCoord || ob1 > kMaxCoord) return false;
+	if (ob2 < -kMaxCoord || ob2 > kMaxCoord) return false;
+	if (flag != 0) return false;
+	return true;
+}
+
+static uintptr_t resolveIntrafileVtxW1(uint32_t w0, uint32_t w1, const PortGfxCmd *cmd_here)
+{
+	uint8_t seg = (uint8_t)((w1 >> 24) & 0xFFU);
+
+	if (seg != 0x05U && seg != 0x0EU)
+	{
+		return 0;
+	}
+
+	uint32_t num_vtx = (w0 >> 12) & 0xFFU;
+
+	if (num_vtx == 0 || num_vtx > 32)
+	{
+		return 0;
+	}
+
+	uint32_t off = w1 & 0x00FFFFFFU;
+	size_t need = static_cast<size_t>(num_vtx) * 16U;
+
+	uintptr_t hint_base = 0;
+	size_t hint_size = 0;
+	const bool have_hint = portRelocFindContainingFile(cmd_here, &hint_base, &hint_size);
+
+	uintptr_t chosen = 0;
+	int hits = 0;
+
+	for (const auto &range : sPortRelocFileRanges)
+	{
+		if (range.size == 0 || off >= range.size)
+		{
+			continue;
+		}
+		if (need > range.size - off)
+		{
+			continue;
+		}
+
+		const uint32_t *va = reinterpret_cast<const uint32_t *>(range.base + static_cast<uintptr_t>(off));
+
+		if (!vtxFirstLooksSane(va))
+		{
+			continue;
+		}
+
+		if (have_hint && range.base == hint_base && range.size == hint_size)
+		{
+			return range.base + static_cast<uintptr_t>(off);
+		}
+
+		chosen = range.base + static_cast<uintptr_t>(off);
+		hits++;
+	}
+
+	if (hits == 1)
+	{
+		return chosen;
+	}
+	if (hits > 1 && have_hint)
+	{
+		for (const auto &range : sPortRelocFileRanges)
+		{
+			if (range.size == 0 || off >= range.size || need > range.size - off)
+			{
+				continue;
+			}
+			if (range.base != hint_base || range.size != hint_size)
+			{
+				continue;
+			}
+			const uint32_t *va = reinterpret_cast<const uint32_t *>(range.base + static_cast<uintptr_t>(off));
+
+			if (vtxFirstLooksSane(va))
+			{
+				return range.base + static_cast<uintptr_t>(off);
+			}
+		}
+	}
+	return 0;
+}
+
+static PortGfxCmd *resolveDlBranchTarget(uintptr_t w1_full, const PortGfxCmd *here)
+{
+	if (w1_full > (uintptr_t)0xFFFFFFFFu)
+	{
+		return reinterpret_cast<PortGfxCmd *>(w1_full);
+	}
+
+	const uint32_t w1 = static_cast<uint32_t>(w1_full);
+
+	if (void *tok = portRelocTryResolvePointer(w1))
+	{
+		return reinterpret_cast<PortGfxCmd *>(tok);
+	}
+
+	const uint8_t seg = (uint8_t)((w1 >> 24) & 0xFFU);
+	const uint32_t off = w1 & 0x00FFFFFFU;
+
+	if (seg == 0x0EU)
+	{
+		uintptr_t b = 0;
+		size_t sz = 0;
+
+		if (portRelocFindContainingFile(here, &b, &sz) && off < sz)
+		{
+			return reinterpret_cast<PortGfxCmd *>(b + static_cast<uintptr_t>(off));
+		}
+		for (const auto &range : sPortRelocFileRanges)
+		{
+			if (range.size != 0 && off < range.size)
+			{
+				return reinterpret_cast<PortGfxCmd *>(range.base + static_cast<uintptr_t>(off));
+			}
+		}
+	}
+	return nullptr;
+}
+
+static void walkGfxDlForVtxSeg(PortGfxCmd *g)
+{
+	constexpr size_t kMaxCmds = 400000U;
+
+	for (;;)
+	{
+		if (++sGfxDlWalkBudget > kMaxCmds)
+		{
+			return;
+		}
+
+		const uint32_t w0 = static_cast<uint32_t>(g->w0);
+		const uint8_t op = (uint8_t)((w0 >> 24) & 0xFFU);
+
+		if (op == kF3dex2EndDlOp)
+		{
+			return;
+		}
+
+		if (op == kF3dex2VtxOp)
+		{
+#if UINTPTR_MAX > 0xFFFFFFFFu
+			if (g->w1 <= (uintptr_t)0xFFFFFFFFu)
+#endif
+			{
+				const uint32_t w1lo = static_cast<uint32_t>(g->w1);
+				const uint8_t seg = (uint8_t)((w1lo >> 24) & 0xFFU);
+
+				if (seg == 0x05U || seg == 0x0EU)
+				{
+					const uintptr_t np = resolveIntrafileVtxW1(w0, w1lo, g);
+
+					if (np != 0)
+					{
+						g->w1 = np;
+					}
+				}
+			}
+			g++;
+			continue;
+		}
+
+		if (op == kF3dex2DlOp)
+		{
+			const bool is_call = (((w0 >> 16) & 1U) == 0U);
+			PortGfxCmd *sub = resolveDlBranchTarget(g->w1, g);
+
+			if (sub != nullptr)
+			{
+				walkGfxDlForVtxSeg(sub);
+			}
+			if (!is_call)
+			{
+				return;
+			}
+			g++;
+			continue;
+		}
+
+		g++;
+	}
+}
+
+static void portRelocFixupGfxDlVtxSeg05Impl(void *dl_root)
+{
+	PortGfxCmd *root = reinterpret_cast<PortGfxCmd *>(dl_root);
+
+	if (root == nullptr)
+	{
+		return;
+	}
+
+	sGfxDlWalkBudget = 0;
+	walkGfxDlForVtxSeg(root);
+}
+
+} // namespace
 
 // All game-facing functions have C linkage
 extern "C" {
@@ -868,6 +1095,17 @@ bool portRelocDescribePointer(const void *ptr, uintptr_t *out_base, size_t *out_
 		}
 	}
 	return FALSE;
+}
+
+// // // // // // // // // // // //
+//                               //
+//    GFX DL — pre-submit fixup  //
+//                               //
+// // // // // // // // // // // //
+
+void portRelocFixupGfxDlVtxSeg05(void *dl_root)
+{
+	portRelocFixupGfxDlVtxSeg05Impl(dl_root);
 }
 
 // // // // // // // // // // // //

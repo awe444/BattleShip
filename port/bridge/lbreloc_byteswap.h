@@ -272,6 +272,22 @@ void portRelocFixupTextureAtRuntime(const void *addr, unsigned int num_bytes);
  */
 void portRelocTexFixupLog(const char *fmt, ...);
 
+/**
+ * Rewrite F3DEX2 G_VTX w1 values that still use N64 intra-file segment
+ * encodings (0x05 or 0x0E in the high byte) into host pointers before the
+ * display list is executed by Fast3D.
+ *
+ * When the RSP segment table does not have those banks loaded (common on
+ * the port for resource DLs that only widened 0x0E elsewhere), SegAddr
+ * returns the raw 0x05xxxxxx word and GfxSpVertex faults on an unmapped
+ * address.
+ *
+ * Walks G_DL (call/branch) recursively with a command budget. Safe to call
+ * on every submit; only mutates cmds whose w1 fits in 32 bits (compact N64
+ * style), leaving full LP64 Gfx pointers untouched.
+ */
+void portRelocFixupGfxDlVtxSeg05(void *dl_root);
+
 #ifdef __cplusplus
 }
 #endif

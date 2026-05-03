@@ -43,6 +43,7 @@
 
 #include "port_log.h"
 #include "renderdoc_trigger.h"
+#include "bridge/lbreloc_byteswap.h"
 
 #if defined(__ANDROID__)
 #include <SDL2/SDL.h>
@@ -335,6 +336,10 @@ extern "C" void port_submit_display_list(void *dl)
 
 	/* Begin trace frame before Fast3D processes the display list */
 	gbi_trace_begin_frame();
+
+	/* Rewrite compact N64 seg 0x05/0x0E G_VTX w1 values to host pointers when
+	 * the RSP segment table has no bank loaded (SegAddr would return garbage). */
+	portRelocFixupGfxDlVtxSeg05(dl);
 
 	std::unordered_map<Mtx *, MtxF> mtxReplacements;
 	try {
