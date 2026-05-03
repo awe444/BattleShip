@@ -3,6 +3,13 @@
 
 #include <PR/ultratypes.h>
 
+/* N64 shim: libc headers (e.g. Android NDK <unistd.h>) expect ptrdiff_t from
+ * <stddef.h>. Do not use #include_next here — include order must stay stable
+ * for IDO builds. HOST/PORT toolchains expose __PTRDIFF_TYPE__. */
+#if defined(PORT) && defined(__PTRDIFF_TYPE__)
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+#endif
+
 #ifdef _MSC_VER
 /* MSVC: offsetof is a compiler intrinsic */
 #ifndef offsetof
