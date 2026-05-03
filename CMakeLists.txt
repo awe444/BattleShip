@@ -54,6 +54,12 @@ set(BUILD_MARIO_ARTIST OFF CACHE BOOL "" FORCE)
 set(BUILD_NAUDIO ON CACHE BOOL "" FORCE)
 set(BUILD_SSB64 ON CACHE BOOL "" FORCE)
 
+# Android: provide TARGET usb-1.0 before hidapi configures (see libultraship
+# cmake/dependencies/common.cmake). Do not rely on host libusb pkg-config.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    include(cmake/AndroidLibusb.cmake)
+endif()
+
 ################################################################################
 # Subdirectories: libultraship
 ################################################################################
