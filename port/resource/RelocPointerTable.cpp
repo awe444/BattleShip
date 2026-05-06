@@ -137,6 +137,11 @@ void *portRelocTryResolvePointer(uint32_t token)
 	return sPointerTable[index];
 }
 
+uint32_t portRelocTokenTableGeneration(void)
+{
+	return sGeneration;
+}
+
 void portRelocResetPointerTable(void)
 {
 	sNextIndex = 1;
