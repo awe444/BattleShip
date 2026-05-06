@@ -1669,6 +1669,29 @@ static void fixup_u16_u8u8(uint32_t *word)
 	p[3] = b0;
 }
 
+// Reloc tokens are native u32 (gen<<20)|index, but pass1's blanket BSWAP32 on
+// the file blob can leave some token slots looking like swapped 16-bit
+// halves (same class of bug as the Sprite u16 pairs — e.g. 0x00C90850
+// instead of 0x085000C9). If TryResolve fails but succeeds on rotate16,
+// repair in place once so PORT_RESOLVE matches the registered token.
+static void fixup_reloc_token_u32_if_needed(uint32_t *slot)
+{
+	uint32_t t = *slot;
+	if (t == 0U)
+	{
+		return;
+	}
+	if (portRelocTryResolvePointer(t) != nullptr)
+	{
+		return;
+	}
+	const uint32_t swapped = (t << 16) | (t >> 16);
+	if (portRelocTryResolvePointer(swapped) != nullptr)
+	{
+		*slot = swapped;
+	}
+}
+
 extern "C" void portFixupSprite(void *sprite)
 {
 	if (sprite == NULL)
@@ -1691,14 +1714,14 @@ extern "C" void portFixupSprite(void *sprite)
 	//  5     0x14    u16 attr, s16 zdepth     rotate16
 	//  6     0x18    u8 r,g,b,a               bswap32
 	//  7     0x1C    s16 startTLUT, s16 nTLUT rotate16
-	//  8     0x20    u32 LUT (token)          (ok)
+	//  8     0x20    u32 LUT (token)          half-swap repair if needed
 	//  9     0x24    s16 istart, s16 istep    rotate16
 	//  10    0x28    s16 nbitmaps, s16 ndisplist rotate16
 	//  11    0x2C    s16 bmheight, s16 bmHreal rotate16
 	//  12    0x30    u8 bmfmt, u8 bmsiz, pad  bswap32
-	//  13    0x34    u32 bitmap (token)        (ok)
-	//  14    0x38    u32 rsp_dl (token)        (ok)
-	//  15    0x3C    u32 rsp_dl_next (token)   (ok)
+	//  13    0x34    u32 bitmap (token)        half-swap repair if needed
+	//  14    0x38    u32 rsp_dl (token)        half-swap repair if needed
+	//  15    0x3C    u32 rsp_dl_next (token)   half-swap repair if needed
 	//  16    0x40    s16 frac_s, s16 frac_t   rotate16
 
 	fixup_rotate16(&w[0]);   // x, y
@@ -1708,12 +1731,14 @@ extern "C" void portFixupSprite(void *sprite)
 	fixup_rotate16(&w[5]);   // attr, zdepth
 	fixup_bswap32(&w[6]);    // rgba
 	fixup_rotate16(&w[7]);   // startTLUT, nTLUT
-	// w[8]: u32 LUT — ok
+	fixup_reloc_token_u32_if_needed(&w[8]); // LUT token
 	fixup_rotate16(&w[9]);   // istart, istep
 	fixup_rotate16(&w[10]);  // nbitmaps, ndisplist
 	fixup_rotate16(&w[11]);  // bmheight, bmHreal
 	fixup_bswap32(&w[12]);   // bmfmt, bmsiz, pad
-	// w[13..15]: u32 tokens — ok
+	fixup_reloc_token_u32_if_needed(&w[13]); // bitmap token
+	fixup_reloc_token_u32_if_needed(&w[14]); // rsp_dl
+	fixup_reloc_token_u32_if_needed(&w[15]); // rsp_dl_next
 	fixup_rotate16(&w[16]);  // frac_s, frac_t
 }
 
@@ -1733,12 +1758,12 @@ extern "C" void portFixupBitmap(void *bitmap)
 	//  Word  Offset  Fields                        Fixup
 	//  0     0x00    s16 width, s16 width_img      rotate16
 	//  1     0x04    s16 s, s16 t                  rotate16
-	//  2     0x08    u32 buf (token)               (ok)
+	//  2     0x08    u32 buf (token)               half-swap repair if needed
 	//  3     0x0C    s16 actualHeight, s16 LUToffset rotate16
 
 	fixup_rotate16(&w[0]);
 	fixup_rotate16(&w[1]);
-	// w[2]: u32 buf — ok
+	fixup_reloc_token_u32_if_needed(&w[2]); // buf token
 	fixup_rotate16(&w[3]);
 }
 
