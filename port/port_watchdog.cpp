@@ -496,9 +496,20 @@ extern "C" void port_watchdog_init(void) {
     sigemptyset(&csa.sa_mask);
     csa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     csa.sa_sigaction = CrashSignalHandler;
-#if !defined(__SANITIZE_ADDRESS__) && !(defined(__has_feature) && __has_feature(address_sanitizer))
+    /* GCC's preprocessor rejects __has_feature(...) in the same #if as
+     * defined(__has_feature) — it still tokenizes the call. Nest #ifs. */
+#if defined(__SANITIZE_ADDRESS__)
+    /* GCC/Clang -fsanitize=address: leave SIGSEGV/SIGBUS to ASan. */
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+    /* Clang ASan without __SANITIZE_ADDRESS__ */
+#  else
     sigaction(SIGSEGV, &csa, nullptr);
-    sigaction(SIGBUS,  &csa, nullptr);
+    sigaction(SIGBUS, &csa, nullptr);
+#  endif
+#else
+    sigaction(SIGSEGV, &csa, nullptr);
+    sigaction(SIGBUS, &csa, nullptr);
 #endif
     sigaction(SIGILL,  &csa, nullptr);
     sigaction(SIGFPE,  &csa, nullptr);
