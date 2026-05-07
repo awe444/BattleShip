@@ -1714,10 +1714,57 @@ static bool sprite_reloc_tokens_plausible(const uint32_t *w)
 	return true;
 }
 
+// True when a non-zero token fails resolve but rotate16 fixes it for the
+// *current* table generation and the raw high bits are NOT a normal stale
+// token generation (>= TOKEN_GENERATION_MIN 0x080). That pattern is the
+// pass1 half-swap / fresh-ROM-at-reused-address case.
+//
+// Do NOT treat plain stale tokens (old gen in 0x080..0xFFF) as heap reuse:
+// re-running rotate16 on u16 fields would double-fix already-native LE data
+// after portRelocResetPointerTable bumps generation (menus look corrupted).
+static bool sprite_has_heap_reuse_halfswapped_tokens(const uint32_t *w)
+{
+	const uint32_t curGen = portRelocTokenTableGeneration();
+	const uint32_t slots[] = { w[8], w[13], w[14], w[15] };
+	for (uint32_t t : slots)
+	{
+		if (t == 0U || portRelocTryResolvePointer(t) != nullptr)
+		{
+			continue;
+		}
+		if ((t >> 20) >= 0x080u)
+		{
+			continue;
+		}
+		const uint32_t swapped = (t << 16) | (t >> 16);
+		if ((swapped >> 20) == curGen && portRelocTryResolvePointer(swapped) != nullptr)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool bitmap_buf_token_plausible(const uint32_t *w)
 {
 	const uint32_t t = w[2];
 	return t == 0U || portRelocTryResolvePointer(t) != nullptr;
+}
+
+static bool bitmap_has_heap_reuse_halfswapped_buf_token(const uint32_t *w)
+{
+	const uint32_t t = w[2];
+	if (t == 0U || portRelocTryResolvePointer(t) != nullptr)
+	{
+		return false;
+	}
+	if ((t >> 20) >= 0x080u)
+	{
+		return false;
+	}
+	const uint32_t curGen = portRelocTokenTableGeneration();
+	const uint32_t swapped = (t << 16) | (t >> 16);
+	return (swapped >> 20) == curGen && portRelocTryResolvePointer(swapped) != nullptr;
 }
 
 extern "C" void portFixupSprite(void *sprite)
@@ -1730,8 +1777,10 @@ extern "C" void portFixupSprite(void *sprite)
 
 	// Bump-reset heaps can place a fresh Sprite at an address we already
 	// keyed — u16 fixups would be skipped while token fields are new ROM
-	// bytes. Drop the key when token slots are no longer valid.
-	if (sStructU16Fixups.count(key) && !sprite_reloc_tokens_plausible(w))
+	// bytes. Only drop the key for the half-swapped-token signature; stale
+	// tokens alone must not re-run rotate16 (would corrupt LE u16 fields).
+	if (sStructU16Fixups.count(key) && !sprite_reloc_tokens_plausible(w) &&
+	    sprite_has_heap_reuse_halfswapped_tokens(w))
 	{
 		sStructU16Fixups.erase(key);
 	}
@@ -1795,7 +1844,8 @@ extern "C" void portFixupBitmap(void *bitmap)
 	uintptr_t key = reinterpret_cast<uintptr_t>(bitmap);
 	uint32_t *w = static_cast<uint32_t *>(bitmap);
 
-	if (sStructU16Fixups.count(key) && !bitmap_buf_token_plausible(w))
+	if (sStructU16Fixups.count(key) && !bitmap_buf_token_plausible(w) &&
+	    bitmap_has_heap_reuse_halfswapped_buf_token(w))
 	{
 		sStructU16Fixups.erase(key);
 	}
