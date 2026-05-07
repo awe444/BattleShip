@@ -42,6 +42,30 @@ option(SSB64_STAGE_CYCLE_DEMO "Boot directly into attract-demo stage cycle for r
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 ################################################################################
+# Port patches to submodule sources (no commits inside submodules)
+#
+# GNU `patch` applies unified diffs from port/decomp-patches/ at configure time.
+# Exit code 1 means "already applied" — ignored. Any higher exit code fails.
+################################################################################
+set(SSB64_PORT_DECOMP_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/port/decomp-patches/lbcommon-port-sprite-reloc-tokens.patch")
+if(EXISTS "${SSB64_PORT_DECOMP_PATCH}" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/lb/lbcommon.c")
+	find_program(SSB64_PATCH_EXECUTABLE patch)
+	if(NOT SSB64_PATCH_EXECUTABLE)
+		message(FATAL_ERROR "GNU patch is required to apply port/decomp-patches (install the 'patch' package).")
+	endif()
+	execute_process(
+		COMMAND "${SSB64_PATCH_EXECUTABLE}" -p1 -N -i "${SSB64_PORT_DECOMP_PATCH}"
+		WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/decomp"
+		RESULT_VARIABLE _ssb64_port_patch_rc
+		OUTPUT_QUIET
+		ERROR_VARIABLE _ssb64_port_patch_err
+	)
+	if(_ssb64_port_patch_rc GREATER 1)
+		message(FATAL_ERROR "Applying ${SSB64_PORT_DECOMP_PATCH} failed (exit ${_ssb64_port_patch_rc}): ${_ssb64_port_patch_err}")
+	endif()
+endif()
+
+################################################################################
 # libultraship configuration (set before add_subdirectory)
 ################################################################################
 
