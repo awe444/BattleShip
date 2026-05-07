@@ -1674,9 +1674,8 @@ static void fixup_u16_u8u8(uint32_t *word)
 // halves (same class of bug as the Sprite u16 pairs — e.g. 0x00C90850
 // instead of 0x085000C9). If TryResolve fails but succeeds on rotate16,
 // repair in place so PORT_RESOLVE matches the registered token.
-//
-// Require the rotated word's generation to match the live table — avoids
-// treating unrelated bit patterns as half-swapped tokens.
+// Success of portRelocTryResolvePointer(swapped) implies the embedded
+// generation matches the live table (decodeToken enforces that).
 static void fixup_reloc_token_u32_if_needed(uint32_t *slot)
 {
 	uint32_t t = *slot;
@@ -1688,17 +1687,29 @@ static void fixup_reloc_token_u32_if_needed(uint32_t *slot)
 	{
 		return;
 	}
-	const uint32_t curGen = portRelocTokenTableGeneration();
 	const uint32_t swapped = (t << 16) | (t >> 16);
-	if ((swapped >> 20) != curGen)
-	{
-		return;
-	}
 	if (portRelocTryResolvePointer(swapped) == nullptr)
 	{
 		return;
 	}
 	*slot = swapped;
+}
+
+static void port_fix_sprite_reloc_token_slots(uint32_t *w)
+{
+	fixup_reloc_token_u32_if_needed(&w[8]);
+	fixup_reloc_token_u32_if_needed(&w[13]);
+	fixup_reloc_token_u32_if_needed(&w[14]);
+	fixup_reloc_token_u32_if_needed(&w[15]);
+}
+
+extern "C" void portFixupSpriteRelocTokensOnly(void *sprite)
+{
+	if (sprite == NULL)
+	{
+		return;
+	}
+	port_fix_sprite_reloc_token_slots(static_cast<uint32_t *>(sprite));
 }
 
 static bool sprite_reloc_tokens_plausible(const uint32_t *w)
@@ -1830,10 +1841,7 @@ extern "C" void portFixupSprite(void *sprite)
 	// Token repair must run on every call: bump-reset heaps reuse the same
 	// Sprite* address after title → menu while sStructU16Fixups still keys
 	// the old visit — skipping would leave half-swapped or stale tokens.
-	fixup_reloc_token_u32_if_needed(&w[8]);  // LUT token
-	fixup_reloc_token_u32_if_needed(&w[13]); // bitmap token
-	fixup_reloc_token_u32_if_needed(&w[14]); // rsp_dl
-	fixup_reloc_token_u32_if_needed(&w[15]); // rsp_dl_next
+	port_fix_sprite_reloc_token_slots(w);
 }
 
 extern "C" void portFixupBitmap(void *bitmap)
