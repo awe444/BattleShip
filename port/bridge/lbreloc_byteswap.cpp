@@ -1669,17 +1669,138 @@ static void fixup_u16_u8u8(uint32_t *word)
 	p[3] = b0;
 }
 
+// Reloc tokens are native u32 (gen<<20)|index, but pass1's blanket BSWAP32 on
+// the file blob can leave some token slots looking like swapped 16-bit
+// halves (same class of bug as the Sprite u16 pairs — e.g. 0x00C90850
+// instead of 0x085000C9). If TryResolve fails but succeeds on rotate16,
+// repair in place so PORT_RESOLVE matches the registered token.
+// Success of portRelocTryResolvePointer(swapped) implies the embedded
+// generation matches the live table (decodeToken enforces that).
+static void fixup_reloc_token_u32_if_needed(uint32_t *slot)
+{
+	uint32_t t = *slot;
+	if (t == 0U)
+	{
+		return;
+	}
+	if (portRelocTryResolvePointer(t) != nullptr)
+	{
+		return;
+	}
+	const uint32_t swapped = (t << 16) | (t >> 16);
+	if (portRelocTryResolvePointer(swapped) == nullptr)
+	{
+		return;
+	}
+	*slot = swapped;
+}
+
+static void port_fix_sprite_reloc_token_slots(uint32_t *w)
+{
+	fixup_reloc_token_u32_if_needed(&w[8]);
+	fixup_reloc_token_u32_if_needed(&w[13]);
+	fixup_reloc_token_u32_if_needed(&w[14]);
+	fixup_reloc_token_u32_if_needed(&w[15]);
+}
+
+extern "C" void portFixupSpriteRelocTokensOnly(void *sprite)
+{
+	if (sprite == NULL)
+	{
+		return;
+	}
+	port_fix_sprite_reloc_token_slots(static_cast<uint32_t *>(sprite));
+}
+
+static bool sprite_reloc_tokens_plausible(const uint32_t *w)
+{
+	const uint32_t slots[] = { w[8], w[13], w[14], w[15] };
+	for (uint32_t t : slots)
+	{
+		if (t != 0U && portRelocTryResolvePointer(t) == nullptr)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// True when a non-zero token fails resolve but rotate16 fixes it for the
+// *current* table generation and the raw high bits are NOT a normal stale
+// token generation (>= TOKEN_GENERATION_MIN 0x080). That pattern is the
+// pass1 half-swap / fresh-ROM-at-reused-address case.
+//
+// Do NOT treat plain stale tokens (old gen in 0x080..0xFFF) as heap reuse:
+// re-running rotate16 on u16 fields would double-fix already-native LE data
+// after portRelocResetPointerTable bumps generation (menus look corrupted).
+static bool sprite_has_heap_reuse_halfswapped_tokens(const uint32_t *w)
+{
+	const uint32_t curGen = portRelocTokenTableGeneration();
+	const uint32_t slots[] = { w[8], w[13], w[14], w[15] };
+	for (uint32_t t : slots)
+	{
+		if (t == 0U || portRelocTryResolvePointer(t) != nullptr)
+		{
+			continue;
+		}
+		if ((t >> 20) >= 0x080u)
+		{
+			continue;
+		}
+		const uint32_t swapped = (t << 16) | (t >> 16);
+		if ((swapped >> 20) == curGen && portRelocTryResolvePointer(swapped) != nullptr)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool bitmap_buf_token_plausible(const uint32_t *w)
+{
+	const uint32_t t = w[2];
+	return t == 0U || portRelocTryResolvePointer(t) != nullptr;
+}
+
+static bool bitmap_has_heap_reuse_halfswapped_buf_token(const uint32_t *w)
+{
+	const uint32_t t = w[2];
+	if (t == 0U || portRelocTryResolvePointer(t) != nullptr)
+	{
+		return false;
+	}
+	if ((t >> 20) >= 0x080u)
+	{
+		return false;
+	}
+	const uint32_t curGen = portRelocTokenTableGeneration();
+	const uint32_t swapped = (t << 16) | (t >> 16);
+	return (swapped >> 20) == curGen && portRelocTryResolvePointer(swapped) != nullptr;
+}
+
 extern "C" void portFixupSprite(void *sprite)
 {
 	if (sprite == NULL)
 		return;
 
 	uintptr_t key = reinterpret_cast<uintptr_t>(sprite);
-	if (sStructU16Fixups.count(key))
-		return;
-	sStructU16Fixups.insert(key);
-
 	uint32_t *w = static_cast<uint32_t *>(sprite);
+
+	// Bump-reset heaps can place a fresh Sprite at an address we already
+	// keyed — u16 fixups would be skipped while token fields are new ROM
+	// bytes. Only drop the key for the half-swapped-token signature; stale
+	// tokens alone must not re-run rotate16 (would corrupt LE u16 fields).
+	if (sStructU16Fixups.count(key) && !sprite_reloc_tokens_plausible(w) &&
+	    sprite_has_heap_reuse_halfswapped_tokens(w))
+	{
+		sStructU16Fixups.erase(key);
+	}
+
+	const bool firstVisit = !sStructU16Fixups.count(key);
+	if (firstVisit)
+	{
+		sStructU16Fixups.insert(key);
+	}
 
 	// Sprite layout (17 words = 68 bytes):
 	//  Word  Offset  Fields                   Fixup
@@ -1691,30 +1812,36 @@ extern "C" void portFixupSprite(void *sprite)
 	//  5     0x14    u16 attr, s16 zdepth     rotate16
 	//  6     0x18    u8 r,g,b,a               bswap32
 	//  7     0x1C    s16 startTLUT, s16 nTLUT rotate16
-	//  8     0x20    u32 LUT (token)          (ok)
+	//  8     0x20    u32 LUT (token)          half-swap repair if needed
 	//  9     0x24    s16 istart, s16 istep    rotate16
 	//  10    0x28    s16 nbitmaps, s16 ndisplist rotate16
 	//  11    0x2C    s16 bmheight, s16 bmHreal rotate16
 	//  12    0x30    u8 bmfmt, u8 bmsiz, pad  bswap32
-	//  13    0x34    u32 bitmap (token)        (ok)
-	//  14    0x38    u32 rsp_dl (token)        (ok)
-	//  15    0x3C    u32 rsp_dl_next (token)   (ok)
+	//  13    0x34    u32 bitmap (token)        half-swap repair if needed
+	//  14    0x38    u32 rsp_dl (token)        half-swap repair if needed
+	//  15    0x3C    u32 rsp_dl_next (token)   half-swap repair if needed
 	//  16    0x40    s16 frac_s, s16 frac_t   rotate16
 
-	fixup_rotate16(&w[0]);   // x, y
-	fixup_rotate16(&w[1]);   // width, height
-	// w[2], w[3]: f32 scalex, scaley — ok
-	fixup_rotate16(&w[4]);   // expx, expy
-	fixup_rotate16(&w[5]);   // attr, zdepth
-	fixup_bswap32(&w[6]);    // rgba
-	fixup_rotate16(&w[7]);   // startTLUT, nTLUT
-	// w[8]: u32 LUT — ok
-	fixup_rotate16(&w[9]);   // istart, istep
-	fixup_rotate16(&w[10]);  // nbitmaps, ndisplist
-	fixup_rotate16(&w[11]);  // bmheight, bmHreal
-	fixup_bswap32(&w[12]);   // bmfmt, bmsiz, pad
-	// w[13..15]: u32 tokens — ok
-	fixup_rotate16(&w[16]);  // frac_s, frac_t
+	if (firstVisit)
+	{
+		fixup_rotate16(&w[0]);   // x, y
+		fixup_rotate16(&w[1]);   // width, height
+		// w[2], w[3]: f32 scalex, scaley — ok
+		fixup_rotate16(&w[4]);   // expx, expy
+		fixup_rotate16(&w[5]);   // attr, zdepth
+		fixup_bswap32(&w[6]);    // rgba
+		fixup_rotate16(&w[7]);   // startTLUT, nTLUT
+		fixup_rotate16(&w[9]);   // istart, istep
+		fixup_rotate16(&w[10]);  // nbitmaps, ndisplist
+		fixup_rotate16(&w[11]);  // bmheight, bmHreal
+		fixup_bswap32(&w[12]);   // bmfmt, bmsiz, pad
+		fixup_rotate16(&w[16]);  // frac_s, frac_t
+	}
+
+	// Token repair must run on every call: bump-reset heaps reuse the same
+	// Sprite* address after title → menu while sStructU16Fixups still keys
+	// the old visit — skipping would leave half-swapped or stale tokens.
+	port_fix_sprite_reloc_token_slots(w);
 }
 
 extern "C" void portFixupBitmap(void *bitmap)
@@ -1723,23 +1850,34 @@ extern "C" void portFixupBitmap(void *bitmap)
 		return;
 
 	uintptr_t key = reinterpret_cast<uintptr_t>(bitmap);
-	if (sStructU16Fixups.count(key))
-		return;
-	sStructU16Fixups.insert(key);
-
 	uint32_t *w = static_cast<uint32_t *>(bitmap);
+
+	if (sStructU16Fixups.count(key) && !bitmap_buf_token_plausible(w) &&
+	    bitmap_has_heap_reuse_halfswapped_buf_token(w))
+	{
+		sStructU16Fixups.erase(key);
+	}
+
+	const bool firstVisit = !sStructU16Fixups.count(key);
+	if (firstVisit)
+	{
+		sStructU16Fixups.insert(key);
+	}
 
 	// Bitmap layout (4 words = 16 bytes):
 	//  Word  Offset  Fields                        Fixup
 	//  0     0x00    s16 width, s16 width_img      rotate16
 	//  1     0x04    s16 s, s16 t                  rotate16
-	//  2     0x08    u32 buf (token)               (ok)
+	//  2     0x08    u32 buf (token)               half-swap repair if needed
 	//  3     0x0C    s16 actualHeight, s16 LUToffset rotate16
 
-	fixup_rotate16(&w[0]);
-	fixup_rotate16(&w[1]);
-	// w[2]: u32 buf — ok
-	fixup_rotate16(&w[3]);
+	if (firstVisit)
+	{
+		fixup_rotate16(&w[0]);
+		fixup_rotate16(&w[1]);
+		fixup_rotate16(&w[3]);
+	}
+	fixup_reloc_token_u32_if_needed(&w[2]); // buf token — every visit (heap reuse)
 }
 
 extern "C" void portFixupBitmapArray(void *bitmaps, unsigned int count)

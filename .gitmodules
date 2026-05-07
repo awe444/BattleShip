@@ -6,3 +6,10 @@
 	path = torch
 	url = https://github.com/JRickey/Torch.git
 	branch = ssb64
+[submodule "decomp"]
+	path = decomp
+	url = https://github.com/JRickey/ssb-decomp-re.git
+	branch = port-patches
+[submodule "Battle-ShipYard"]
+	path = Battle-ShipYard
+	url = https://github.com/JRickey/Battle-ShipYard.git

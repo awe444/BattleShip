@@ -13,10 +13,22 @@
 #     SDL2.dll                   — runtime dependency (vcpkg-bundled)
 #     <other vcpkg DLLs>         — picked up by Get-ChildItem from build dir
 #
-# Built with NON_PORTABLE=ON so saves and config land in
-# %APPDATA%\BattleShip\ instead of next to the .exe — same as macOS bundle.
-# BattleShip.o2r is NOT bundled; the first-run wizard extracts it from the
-# user's ROM into %APPDATA%\BattleShip\BattleShip.o2r.
+# Portable: drop the extracted folder anywhere and run BattleShip.exe.
+# Save data and config (ssb64_save.bin, BattleShip.cfg.json, logs/) land
+# next to the .exe in the extraction directory — move the folder, the
+# saves move with it. BattleShip.o2r is NOT bundled; the first-run wizard
+# extracts it from the user's ROM into the same directory as BattleShip.exe.
+#
+# We intentionally do NOT pass -DNON_PORTABLE=ON. NON_PORTABLE bakes
+# CMAKE_INSTALL_PREFIX into libultraship's install_config.h at configure
+# time, and CMake resolves any relative prefix against the configure cwd —
+# so on the GitHub Actions runner that bakes the runner workspace path
+# (e.g. "D:/a/BattleShip/BattleShip/BattleShip"), which v0.7.2 shipped
+# and which crashed user machines whose D: drive returned ERROR_NOT_READY
+# when libultraship probed it. Building portable side-steps the entire
+# class of bug: the runtime resolves resource paths via GetModuleFileNameW
+# (LUS Context::GetAppBundlePath, _WIN32 branch) and saves via the same
+# mechanism, so the only paths the binary ever touches are exe-relative.
 
 $ErrorActionPreference = "Stop"
 
@@ -32,12 +44,12 @@ function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 
 # ── 0. Run codegen scripts that don't need the ROM ──
-# Encoded credit files are gitignored (input text is in src/credits/),
+# Encoded credit files are gitignored (input text is in decomp/src/credits/),
 # so a fresh checkout (CI or otherwise) must run the encoder before
 # cmake builds scstaffroll.c. ROM-independent — same step CMake's
 # GenerateCreditsAssets target runs.
 Write-Step "Encoding credits text"
-Push-Location (Join-Path $Root "src/credits")
+Push-Location (Join-Path $Root "decomp/src/credits")
 foreach ($f in @("staff.credits.us.txt", "titles.credits.us.txt")) {
     & python "$Root/tools/creditsTextConverter.py" $f | Out-Null
     if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "credits encode failed: $f" }
@@ -48,20 +60,15 @@ foreach ($f in @("info.credits.us.txt", "companies.credits.us.txt")) {
 }
 Pop-Location
 
-# ── 1. Configure + build with NON_PORTABLE=ON (Release) ──
-Write-Step "Configuring release build with NON_PORTABLE=ON"
-# CMAKE_INSTALL_PREFIX is baked into libultraship's install_config.h at
-# configure time and returned by Ship::Context::GetAppBundlePath() under
-# NON_PORTABLE. CMake's Windows default is $ENV{ProgramFiles(x86)}/<project>
-# (e.g. "C:\Program Files (x86)\ssb64") which is meaningless for a zip the
-# user extracts to an arbitrary directory. We never run `cmake --install`,
-# so the value is cosmetic — the runtime path resolution lives in
-# port/app_paths.cpp::RealAppBundlePath() (GetModuleFileNameW). Set a
-# readable label so log lines make sense.
+# ── 1. Configure + build (Release, portable) ──
+Write-Step "Configuring release build (portable)"
+# No NON_PORTABLE, no CMAKE_INSTALL_PREFIX. LUS resolves the bundle path
+# via GetModuleFileNameW at runtime, and the port's port_save.cpp +
+# Ship::Context::GetAppDirectoryPath() route saves/config to the cwd
+# (= BattleShip.exe's directory when launched normally). See the file
+# header for the v0.7.2 crash this avoids.
 cmake -B $BuildDir $Root `
     -DCMAKE_BUILD_TYPE=Release `
-    -DNON_PORTABLE=ON `
-    -DCMAKE_INSTALL_PREFIX=BattleShip `
     | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "cmake configure failed" }
 
@@ -119,10 +126,47 @@ Copy-Item (Join-Path $Root "assets\icon.ico") (Join-Path $StageDir "$AppName.ico
 # <staging>\assets\custom\fonts\ next to the .exe matches the first
 # iteration of the walker rooted at the .exe's directory. Without this
 # the menu falls back to ImGui's default font silently.
+#
+# OFL 1.1 §1 requires the license text to accompany each redistributed
+# font file, so the *-OFL.txt files ship alongside the .ttf they govern.
 $FontsDir = Join-Path $StageDir "assets\custom\fonts"
 New-Item -ItemType Directory -Path $FontsDir -Force | Out-Null
 Copy-Item (Join-Path $Root "assets\custom\fonts\Montserrat-Regular.ttf")  $FontsDir
+Copy-Item (Join-Path $Root "assets\custom\fonts\Montserrat-OFL.txt")      $FontsDir
 Copy-Item (Join-Path $Root "assets\custom\fonts\Inconsolata-Regular.ttf") $FontsDir
+Copy-Item (Join-Path $Root "assets\custom\fonts\Inconsolata-OFL.txt")     $FontsDir
+
+# Project LICENSE + verbatim upstream LICENSE files for the submodules
+# whose compiled code is in this distribution. MIT requires the upstream
+# copyright + permission notice to ride along with redistributed copies.
+# .txt suffix follows Windows convention so users can double-click open.
+Copy-Item (Join-Path $Root "LICENSE") (Join-Path $StageDir "LICENSE.txt")
+$LicensesDir = Join-Path $StageDir "licenses"
+New-Item -ItemType Directory -Path $LicensesDir -Force | Out-Null
+$LusLicense = Join-Path $Root "libultraship\LICENSE"
+$TorchLicense = Join-Path $Root "torch\LICENSE"
+if (-not (Test-Path $LusLicense))   { Fail "libultraship\LICENSE not found - submodules not initialized?" }
+if (-not (Test-Path $TorchLicense)) { Fail "torch\LICENSE not found - submodules not initialized?" }
+Copy-Item $LusLicense   (Join-Path $LicensesDir "libultraship-LICENSE.txt")
+Copy-Item $TorchLicense (Join-Path $LicensesDir "torch-LICENSE.txt")
+@'
+This directory contains license texts for third-party components whose
+compiled code is included in this BattleShip distribution:
+
+  - libultraship-LICENSE.txt  (MIT, Copyright (c) 2022 kenix3)
+  - torch-LICENSE.txt         (MIT, Copyright (c) 2023 Lywx)
+
+Bundled font licenses (SIL Open Font License 1.1) live alongside the
+font files at assets\custom\fonts\.
+
+The BattleShip project's own MIT license is in ..\LICENSE.txt.
+
+Additional libraries dynamically linked at runtime (SDL2, GLEW, libzip,
+nlohmann_json, tinyxml2, spdlog, fmt, hidapi-via-libultraship) are
+distributed under their respective upstream licenses (zlib, modified
+BSD, BSD-3-Clause, MIT). Refer to those upstream packages for full
+license texts.
+'@ | Set-Content -Path (Join-Path $LicensesDir "README.txt") -Encoding UTF8
 
 # Bundle DLLs that landed next to BattleShip.exe (vcpkg drops SDL2.dll, etc.).
 $ExeBuildDir = Split-Path $GameExe -Parent
@@ -144,5 +188,5 @@ if (-not (Test-Path $ZipPath)) { Fail "zip was not created" }
 
 $ZipKB = [int]((Get-Item $ZipPath).Length / 1024)
 Write-Host "`n✓ Release zip ready: $ZipPath ($ZipKB KB)" -ForegroundColor Green
-Write-Host "   App-data: %APPDATA%\BattleShip\"
+Write-Host "   Portable: extract anywhere; save data lives next to BattleShip.exe."
 Write-Host "   First launch will prompt for your ROM via the ImGui wizard."

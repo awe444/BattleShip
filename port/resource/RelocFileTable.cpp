@@ -8,7 +8,7 @@
 #include "RelocFileTable.h"
 
 const char* const gRelocFileTable[RELOC_FILE_COUNT] = {
-	"reloc_menus/MNCommon", /* 0 */
+	"reloc_animations/FTYoshiAnimWin2", /* 0 */
 	"reloc_menus/MNMain", /* 1 */
 	"reloc_menus/MN1P", /* 2 */
 	"reloc_menus/MNIndex", /* 3 */
