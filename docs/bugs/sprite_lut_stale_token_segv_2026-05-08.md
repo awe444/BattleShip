@@ -68,6 +68,38 @@ the *previous* TLUT bound (visual glitch) instead of feeding the F3D
 interpreter a bogus pointer (crash) — the same trade-off already accepted for
 NULL-bitmap returns in `lbCommonDecodeSpriteBitmapsSiz4b`.
 
+## Per-`Bitmap.buf` follow-up (PR comment 4410476377)
+
+A separate SEGV with the same root cause was reported against
+`lbCommonDecodeBitmapSiz4b`:
+
+```
+#0 lbCommonDecodeBitmapSiz4b (bitmap_csr=0x40fff, bitmap_buf=0x81fff,
+                              bitmap_start=0x0)               lbcommon.c:2373
+#1 lbCommonDecodeSpriteBitmapsSiz4b (sprite=0x55555ab91680)   lbcommon.c:2410
+#2 lbCommonMakeSObjForGObj                                    lbcommon.c:3120
+#3 mnMessageMakeMessage                                       mnmessage.c:190
+```
+
+The argument values are the smoking gun: with `n=48` and `res=532480`,
+`(NULL + res/2 - 1) = 0x40fff` (`bitmap_csr`), `(NULL + res - 1) = 0x81fff`
+(`bitmap_buf`), `NULL = 0x0` (`bitmap_start`) — i.e. `PORT_RESOLVE(bitmap[n-1].buf)`
+returned `NULL` and `(NULL + offset)` was passed straight into the decoder.
+The decoder then walks down from a bogus `bitmap_csr` address and SEGVs.
+
+This is the exact same family as the LUT case but at a per-`Bitmap` field
+that the existing patch did not yet cover. The first guard the patch added —
+`if (bitmap == NULL) return;` — only catches the case where the *array*
+pointer itself is unresolvable; here the array resolved fine
+(`bitmap=0x55555ab91660`) but its individual `buf` token did not.
+
+The fix mirrors the LUT pattern: inside the loop body, after computing
+`res`, retry `portFixupBitmap(&bitmap[n - 1])` and `continue` past the
+`lbCommonDecodeBitmapSiz4b` call if `PORT_RESOLVE(bitmap[n - 1].buf)` is
+still `NULL`. Skipping the decode for one frame leaves the sprite undecoded
+(brief visual glitch) instead of SEGVing the whole process. The non-PORT
+decomp path is unchanged.
+
 ## Audit hook
 
 Any other `PORT_RESOLVE(sprite->LUT)` or `PORT_RESOLVE(*->bitmap)` call site

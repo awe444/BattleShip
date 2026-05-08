@@ -9,7 +9,7 @@ diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
  extern void portFixupBitmap(void *bitmap);
  extern void portFixupBitmapArray(void *bitmaps, unsigned int count);
  extern void portFixupSpriteBitmapData(void *sprite, void *bitmaps);
-@@ -2389,9 +2390,21 @@
+@@ -2389,15 +2390,42 @@
  {
      s32 n;
      Bitmap *bitmap;
@@ -31,7 +31,28 @@ diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
 +#endif
          s32 res = (bitmap[n - 1].width_img / 2) * bitmap[n - 1].actualHeight;
  
++#ifdef PORT
++        /* Per-Bitmap .buf can resolve to NULL when its reloc token is stale
++         * (fresh sprite landing at recycled heap address before bitmap[].buf
++         * re-registers). Retry the per-bitmap fixup and skip the decode
++         * rather than feeding (NULL + res/2 - 1) into lbCommonDecodeBitmapSiz4b
++         * — that walks bogus pointers and SEGVs. Repro: mnMessageMakeMessage
++         * -> lbCommonMakeSObjForGObj -> here, with bitmap_csr=0x40fff /
++         * bitmap_buf=0x81fff / bitmap_start=0x0 (PR comment 4410476377). */
++        portFixupBitmap(&bitmap[n - 1]);
++        if (PORT_RESOLVE(bitmap[n - 1].buf) == NULL)
++        {
++            continue;
++        }
++#endif
++
          lbCommonDecodeBitmapSiz4b
+         (
+             (u8*) ((u8*)PORT_RESOLVE(bitmap[n - 1].buf) + (res / 2) - 1),
+             (u8*) ((u8*)PORT_RESOLVE(bitmap[n - 1].buf) + (res - 1)),
+             (u8*) ((u8*)PORT_RESOLVE(bitmap[n - 1].buf))
+         );
+     }
 @@ -2813,7 +2826,20 @@
  
          case G_IM_FMT_CI:
