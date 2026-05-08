@@ -1,0 +1,143 @@
+diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
+index 3f04802e8..73bb7ab57 100644
+--- a/src/lb/lbcommon.c
++++ b/src/lb/lbcommon.c
+@@ -3202,6 +3202,11 @@ void lbCommonDrawSprite(GObj *camera_gobj)
+     s32 lrx = (viewport->vtrans[0] / 4) + (viewport->vscale[0] / 4);
+     s32 lry = (viewport->vtrans[1] / 4) + (viewport->vscale[1] / 4);
+     
++#ifndef PORT
++    /* CRT-overscan-safe 10-pixel inset.  See objdisplay.c
++     * dGCCameraScissor* and rdp.c syRdpSetViewport for the parallel
++     * PORT-only changes that drop this inset to fill the full 4:3
++     * frame on modern displays. */
+     if (ulx < (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT) * 10)
+     {
+         ulx = (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT) * 10;
+@@ -3218,6 +3223,7 @@ void lbCommonDrawSprite(GObj *camera_gobj)
+     {
+         lry = gSYVideoResHeight - ((gSYVideoResHeight / GS_SCREEN_HEIGHT_DEFAULT) * 10);
+     }
++#endif
+     lbCommonStartSprite(gSYTaskmanDLHeads);
+     lbCommonSetSpriteScissor(ulx, lrx, uly, lry);
+ 
+diff --git a/src/lb/lbfade.c b/src/lb/lbfade.c
+index 1b1d4b00f..77319f390 100644
+--- a/src/lb/lbfade.c
++++ b/src/lb/lbfade.c
+@@ -69,7 +69,15 @@ void lbFadeProcDisplay(GObj *gobj)
+     gDPSetPrimColor(gSYTaskmanDLHeads[0]++, 0, 0, sLBFadeColor.r, sLBFadeColor.g, sLBFadeColor.b, alpha);
+     gDPSetCombineMode(gSYTaskmanDLHeads[0]++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+     gDPSetRenderMode(gSYTaskmanDLHeads[0]++, G_RM_CLD_SURF, G_RM_CLD_SURF2);
++#ifdef PORT
++    /* Cover the full frame so the screen-fade overlay reaches the
++     * framebuffer edges that the expanded viewport (rdp.c
++     * syRdpSetViewport) now draws into.  Otherwise scene transitions
++     * leave a faint un-faded ring at the original 10-px inset. */
++    gDPFillRectangle(gSYTaskmanDLHeads[0]++, 0, 0, GS_SCREEN_WIDTH_DEFAULT, GS_SCREEN_HEIGHT_DEFAULT);
++#else
+     gDPFillRectangle(gSYTaskmanDLHeads[0]++, 10, 10, GS_SCREEN_WIDTH_DEFAULT - 10, GS_SCREEN_HEIGHT_DEFAULT - 10);
++#endif
+     gDPPipeSync(gSYTaskmanDLHeads[0]++);
+ }
+ 
+diff --git a/src/sys/objdisplay.c b/src/sys/objdisplay.c
+index 09c35331b..9f994ec97 100644
+--- a/src/sys/objdisplay.c
++++ b/src/sys/objdisplay.c
+@@ -374,6 +374,25 @@ static void gcLogSuspiciousDLPointer(const char *issue, DObj *dobj, unsigned lon
+ //                               //
+ // // // // // // // // // // // //
+ 
++#ifdef PORT
++/* Per-camera scissor inset.  Decomp default is 10 pixels on every side
++ * to match SSB64's CRT-overscan-safe authoring.  On PORT we zero this
++ * so the expanded viewport from syRdpSetViewport (rdp.c) is not
++ * re-clamped back to the (10,10)-(310,230) inset by func_80016000 /
++ * func_8001663C / func_80018134, which derive ulx/uly/lrx/lry from the
++ * viewport vscale/vtrans and then clamp through these globals. */
++// 0x8003B930
++s32 dGCCameraScissorTop = 0;
++
++// 0x8003B934
++s32 dGCCameraScissorBottom = 0;
++
++// 0x8003B938
++s32 dGCCameraScissorLeft = 0;
++
++// 0x8003B93C
++s32 dGCCameraScissorRight = 0;
++#else
+ // 0x8003B930
+ s32 dGCCameraScissorTop = 10;
+ 
+@@ -385,6 +404,7 @@ s32 dGCCameraScissorLeft = 10;
+ 
+ // 0x8003B93C
+ s32 dGCCameraScissorRight = 10;
++#endif
+ 
+ // // // // // // // // // // // //
+ //                               //
+diff --git a/src/sys/rdp.c b/src/sys/rdp.c
+index b34a913bd..132c2f50b 100644
+--- a/src/sys/rdp.c
++++ b/src/sys/rdp.c
+@@ -70,8 +70,33 @@ Vp gSYRdpViewport;
+ // 0x80007080
+ void syRdpSetViewport(Vp *viewport, f32 ulx, f32 uly, f32 lrx, f32 lry)
+ {
+-    f32 h = (ulx + lrx) / 2.0F;
+-    f32 v = (uly + lry) / 2.0F;
++    f32 h;
++    f32 v;
++
++#ifdef PORT
++    /* SSB64 emits the standard 10-pixel CRT-overscan-safe inset
++     * (10,10)-(310,230) inside the 320x240 frame for every gameplay,
++     * cutscene, and menu camera (see hundreds of call sites such as
++     * mvopening*.c, mvending.c, ifcommon.c).  On a modern flat panel that
++     * inset just produces unnecessary black borders ~3% wide on each
++     * side.  Detect the canonical extents and expand them to the full
++     * frame.  Other extents (e.g. the magnified ifcommon viewport) are
++     * left untouched.  Companion changes in syRdpResetSettings,
++     * lbCommonDrawSprite, lbFadeProcDisplay, and the matching scissor-
++     * default updates elsewhere drop the corresponding scissor and fade
++     * insets so the expanded viewport actually reaches the framebuffer
++     * edges. */
++    if (ulx == 10.0F && uly == 10.0F && lrx == 310.0F && lry == 230.0F)
++    {
++        ulx = 0.0F;
++        uly = 0.0F;
++        lrx = (f32) GS_SCREEN_WIDTH_DEFAULT;
++        lry = (f32) GS_SCREEN_HEIGHT_DEFAULT;
++    }
++#endif
++
++    h = (ulx + lrx) / 2.0F;
++    v = (uly + lry) / 2.0F;
+ 
+     viewport->vp.vscale[0] = ((s32) ((lrx - h) * 4.0F)) & 0xFFFF;
+     viewport->vp.vscale[1] = ((s32) ((lry - v) * 4.0F)) & 0xFFFF;
+@@ -107,10 +132,20 @@ void syRdpResetSettings(Gfx **dls)
+     (
+         dl++,
+         G_SC_NON_INTERLACE,
++#ifdef PORT
++        /* Drop the 10-pixel overscan inset on the per-frame default
++         * scissor so the expanded viewport from syRdpSetViewport reaches
++         * the framebuffer edges. */
++        0,
++        0,
++        gSYVideoResWidth,
++        gSYVideoResHeight
++#else
+         10 * (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT),
+         10 * (gSYVideoResHeight / GS_SCREEN_HEIGHT_DEFAULT),
+         gSYVideoResWidth - 10 * (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT),
+         gSYVideoResHeight - 10 * (gSYVideoResHeight / GS_SCREEN_HEIGHT_DEFAULT)
++#endif
+     );
+     if (dSYRdpFuncLights != NULL)
+     { 
