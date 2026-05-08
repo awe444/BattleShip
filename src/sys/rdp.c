@@ -80,9 +80,10 @@ void syRdpSetViewport(Vp *viewport, f32 ulx, f32 uly, f32 lrx, f32 lry)
      * side.  Detect the canonical extents and expand them to the full
      * frame.  Other extents (e.g. the magnified ifcommon viewport) are
      * left untouched.  Companion changes in syRdpResetSettings,
-     * gcSetCameraScissor, lbCommonDrawSprite, and lbFadeProcDisplay drop
-     * the matching scissor and fade insets so the expanded viewport
-     * actually reaches the framebuffer edges. */
+     * lbCommonDrawSprite, lbFadeProcDisplay, and the matching scissor-
+     * default updates elsewhere drop the corresponding scissor and fade
+     * insets so the expanded viewport actually reaches the framebuffer
+     * edges. */
     if (ulx == 10.0F && uly == 10.0F && lrx == 310.0F && lry == 230.0F)
     {
         ulx = 0.0F;
