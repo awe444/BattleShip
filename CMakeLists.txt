@@ -19,6 +19,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# CMake 3.28+ may scan C++20 sources for import/module with Ninja+Clang, which requires
+# clang-scan-deps beside the compiler. We do not use C++ modules; disable scanning so
+# Clang toolchains without clang-scan-deps still configure and build.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+    set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build." FORCE)
 endif()
@@ -33,6 +40,30 @@ option(USE_AUTO_VCPKG "Use automated vcpkg for dependency management" ON)
 option(SSB64_STAGE_CYCLE_DEMO "Boot directly into attract-demo stage cycle for rendering regression testing" OFF)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+################################################################################
+# Port patches to submodule sources (no commits inside submodules)
+#
+# GNU `patch` applies unified diffs from port/decomp-patches/ at configure time.
+# Exit code 1 means "already applied" — ignored. Any higher exit code fails.
+################################################################################
+set(SSB64_PORT_DECOMP_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/port/decomp-patches/lbcommon-port-sprite-reloc-tokens.patch")
+if(EXISTS "${SSB64_PORT_DECOMP_PATCH}" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/lb/lbcommon.c")
+	find_program(SSB64_PATCH_EXECUTABLE patch)
+	if(NOT SSB64_PATCH_EXECUTABLE)
+		message(FATAL_ERROR "GNU patch is required to apply port/decomp-patches (install the 'patch' package).")
+	endif()
+	execute_process(
+		COMMAND "${SSB64_PATCH_EXECUTABLE}" -p1 -N -i "${SSB64_PORT_DECOMP_PATCH}"
+		WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/decomp"
+		RESULT_VARIABLE _ssb64_port_patch_rc
+		OUTPUT_QUIET
+		ERROR_VARIABLE _ssb64_port_patch_err
+	)
+	if(_ssb64_port_patch_rc GREATER 1)
+		message(FATAL_ERROR "Applying ${SSB64_PORT_DECOMP_PATCH} failed (exit ${_ssb64_port_patch_rc}): ${_ssb64_port_patch_err}")
+	endif()
+endif()
 
 ################################################################################
 # libultraship configuration (set before add_subdirectory)
@@ -54,6 +85,12 @@ set(BUILD_MARIO_ARTIST OFF CACHE BOOL "" FORCE)
 set(BUILD_NAUDIO ON CACHE BOOL "" FORCE)
 set(BUILD_SSB64 ON CACHE BOOL "" FORCE)
 
+# Android: provide TARGET usb-1.0 before hidapi configures (see libultraship
+# cmake/dependencies/common.cmake). Do not rely on host libusb pkg-config.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    include(cmake/AndroidLibusb.cmake)
+endif()
+
 ################################################################################
 # Subdirectories: libultraship
 ################################################################################
@@ -67,6 +104,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
         SOURCE_DIR ${CMAKE_SOURCE_DIR}/torch
         CMAKE_ARGS
             -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/torch-install
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
             -DUSE_STANDALONE=ON
             -DBUILD_STORMLIB=OFF
             -DBUILD_SM64=OFF
@@ -81,7 +119,14 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
 
     ExternalProject_Get_Property(TorchExternal install_dir)
     if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        set(TORCH_EXECUTABLE ${install_dir}/src/TorchExternal-build/$<CONFIGURATION>/torch.exe)
+        # Torch is built via ExternalProject_Add and inherits the parent generator.
+        # Multi-config generators (Visual Studio) place the binary under <CONFIG>/;
+        # single-config generators (Ninja, NMake) drop it directly in the build dir.
+        if(CMAKE_CONFIGURATION_TYPES)
+            set(TORCH_EXECUTABLE ${install_dir}/src/TorchExternal-build/$<CONFIG>/torch.exe)
+        else()
+            set(TORCH_EXECUTABLE ${install_dir}/src/TorchExternal-build/torch.exe)
+        endif()
         set(TORCH_SIDECAR_NAME torch.exe)
     else()
         set(TORCH_EXECUTABLE ${install_dir}/src/TorchExternal-build/torch)
@@ -111,14 +156,14 @@ set(SSB64_RELOC_YAML_FILES
 )
 
 set(SSB64_CREDITS_GENERATED_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/staff.credits.encoded
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/staff.credits.metadata
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/titles.credits.encoded
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/titles.credits.metadata
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/info.credits.encoded
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/info.credits.metadata
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/companies.credits.encoded
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/credits/companies.credits.metadata
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/staff.credits.encoded
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/staff.credits.metadata
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/titles.credits.encoded
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/titles.credits.metadata
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/info.credits.encoded
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/info.credits.metadata
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/companies.credits.encoded
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits/companies.credits.metadata
 )
 
 add_custom_target(RegenerateRelocYamls
@@ -142,9 +187,9 @@ add_custom_target(GenerateCreditsAssets
     BYPRODUCTS ${SSB64_CREDITS_GENERATED_FILES}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/creditsTextConverter.py staff.credits.us.txt
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/creditsTextConverter.py titles.credits.us.txt
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/creditsTextConverter.py -paragraphFont info.credits.us.txt
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/creditsTextConverter.py -paragraphFont -multiline info.credits.us.txt
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/creditsTextConverter.py -paragraphFont companies.credits.us.txt
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/credits
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src/credits
     COMMENT "Encoding credits text assets"
 )
 
@@ -162,20 +207,20 @@ add_custom_target(ExtractAssetHeaders
 ################################################################################
 
 # Decomp game code (exclude debug overlay and debug battle/menu)
-file(GLOB_RECURSE SSB64_SRC_CREDITS "src/credits/*.c" "src/credits/*.h")
-file(GLOB_RECURSE SSB64_SRC_EF      "src/ef/*.c"      "src/ef/*.h")
-file(GLOB_RECURSE SSB64_SRC_FT      "src/ft/*.c"      "src/ft/*.h")
-file(GLOB_RECURSE SSB64_SRC_GM      "src/gm/*.c"      "src/gm/*.h")
-file(GLOB_RECURSE SSB64_SRC_GR      "src/gr/*.c"      "src/gr/*.h")
-file(GLOB_RECURSE SSB64_SRC_IF      "src/if/*.c"      "src/if/*.h")
-file(GLOB_RECURSE SSB64_SRC_IT      "src/it/*.c"      "src/it/*.h")
-file(GLOB_RECURSE SSB64_SRC_LB      "src/lb/*.c"      "src/lb/*.h")
-file(GLOB_RECURSE SSB64_SRC_MN      "src/mn/*.c"      "src/mn/*.h")
-file(GLOB_RECURSE SSB64_SRC_MP      "src/mp/*.c"      "src/mp/*.h")
-file(GLOB_RECURSE SSB64_SRC_MV      "src/mv/*.c"      "src/mv/*.h")
-file(GLOB_RECURSE SSB64_SRC_SC      "src/sc/*.c"      "src/sc/*.h")
-file(GLOB_RECURSE SSB64_SRC_SYS     "src/sys/*.c"     "src/sys/*.h")
-file(GLOB_RECURSE SSB64_SRC_WP      "src/wp/*.c"      "src/wp/*.h")
+file(GLOB_RECURSE SSB64_SRC_CREDITS "decomp/src/credits/*.c" "decomp/src/credits/*.h")
+file(GLOB_RECURSE SSB64_SRC_EF      "decomp/src/ef/*.c"      "decomp/src/ef/*.h")
+file(GLOB_RECURSE SSB64_SRC_FT      "decomp/src/ft/*.c"      "decomp/src/ft/*.h")
+file(GLOB_RECURSE SSB64_SRC_GM      "decomp/src/gm/*.c"      "decomp/src/gm/*.h")
+file(GLOB_RECURSE SSB64_SRC_GR      "decomp/src/gr/*.c"      "decomp/src/gr/*.h")
+file(GLOB_RECURSE SSB64_SRC_IF      "decomp/src/if/*.c"      "decomp/src/if/*.h")
+file(GLOB_RECURSE SSB64_SRC_IT      "decomp/src/it/*.c"      "decomp/src/it/*.h")
+file(GLOB_RECURSE SSB64_SRC_LB      "decomp/src/lb/*.c"      "decomp/src/lb/*.h")
+file(GLOB_RECURSE SSB64_SRC_MN      "decomp/src/mn/*.c"      "decomp/src/mn/*.h")
+file(GLOB_RECURSE SSB64_SRC_MP      "decomp/src/mp/*.c"      "decomp/src/mp/*.h")
+file(GLOB_RECURSE SSB64_SRC_MV      "decomp/src/mv/*.c"      "decomp/src/mv/*.h")
+file(GLOB_RECURSE SSB64_SRC_SC      "decomp/src/sc/*.c"      "decomp/src/sc/*.h")
+file(GLOB_RECURSE SSB64_SRC_SYS     "decomp/src/sys/*.c"     "decomp/src/sys/*.h")
+file(GLOB_RECURSE SSB64_SRC_WP      "decomp/src/wp/*.c"      "decomp/src/wp/*.h")
 
 # Port layer (C++ glue) — excludes port/stubs/ which is compiled as part of ssb64_game
 file(GLOB_RECURSE SSB64_SRC_PORT "port/*.cpp" "port/*.c" "port/*.h")
@@ -271,10 +316,10 @@ target_sources(ssb64_game PRIVATE ${SSB64_STUBS})
 # Selectively include decomp libultra files that provide needed functionality.
 # These are pure C implementations that work on any platform.
 set(SSB64_LIBULTRA_PORT
-    src/libultra/gu/mtxcatf.c       # guMtxCatF
-    src/libultra/gu/mtxutil.c        # guMtxF2L, guMtxL2F, guMtxIdentF
-    src/libultra/gu/mtxxfmf.c        # guMtxXFMF
-    src/libultra/gu/normalize.c      # guNormalize
+    decomp/src/libultra/gu/mtxcatf.c       # guMtxCatF
+    decomp/src/libultra/gu/mtxutil.c        # guMtxF2L, guMtxL2F, guMtxIdentF
+    decomp/src/libultra/gu/mtxxfmf.c        # guMtxXFMF
+    decomp/src/libultra/gu/normalize.c      # guNormalize
     # NOTE: sprite.c is NOT included — drawbitmap is assembly-only (MIPS).
     # Sprite functions are stubbed in port/stubs/n64_stubs.c instead.
 )
@@ -284,41 +329,42 @@ target_sources(ssb64_game PRIVATE ${SSB64_LIBULTRA_PORT})
 # These decomp files are compiled with PORT defines; the CPU Acmd interpreter
 # (port/audio/mixer.h) replaces RSP microcode via macro substitution.
 set(SSB64_NAUDIO_PORT
-    src/libultra/n_audio/n_env.c             # Core: synth driver, audio frame, pull chain, CSP, FX, event queue
-    src/libultra/n_audio/n_synaddplayer.c     # Add player to synth driver
-    src/libultra/n_audio/n_synallocfx.c       # FX bus allocation
-    src/libultra/n_audio/n_synallocvoice.c    # Voice allocation + stealing
-    src/libultra/n_audio/n_synfreevoice.c     # Voice free
-    src/libultra/n_audio/n_syndelete.c        # Synth delete
-    src/libultra/n_audio/n_synsetfxmix.c      # Voice FX mix
-    src/libultra/n_audio/n_synsetpan.c        # Voice pan
-    src/libultra/n_audio/n_synsetpitch.c      # Voice pitch
-    src/libultra/n_audio/n_synsetpriority.c   # Voice priority
-    src/libultra/n_audio/n_synsetvol.c        # Voice volume
-    src/libultra/n_audio/n_synstartvoiceparam.c # Voice start with params
-    src/libultra/n_audio/n_synstopvoice.c     # Voice stop
-    src/libultra/n_audio/n_cspplay.c          # CSP play
-    src/libultra/n_audio/n_cspsetbank.c       # CSP set bank
-    src/libultra/n_audio/n_cspsetfxmix.c      # CSP set FX mix
-    src/libultra/n_audio/n_cspsetpriority.c   # CSP set priority
-    src/libultra/n_audio/n_cspsetseq.c        # CSP set sequence
-    src/libultra/n_audio/n_cspsetvol.c        # CSP set volume
-    src/libultra/n_audio/n_cspstop.c          # CSP stop
-    src/libultra/n_audio/n_seq.c              # Sequence data reader
-    src/libultra/n_audio/n_seqplayer.c        # Sequence player voice handler
-    src/libultra/n_audio/n_seqpgetchlvol.c    # Get channel volume
-    src/libultra/n_audio/n_seqpgetvol.c       # Get master volume
-    src/libultra/audio/cents2ratio.c          # alCents2Ratio — pitch conversion
+    decomp/src/libultra/n_audio/n_env.c             # Core: synth driver, audio frame, pull chain, CSP, FX, event queue
+    decomp/src/libultra/n_audio/n_synaddplayer.c     # Add player to synth driver
+    decomp/src/libultra/n_audio/n_synallocfx.c       # FX bus allocation
+    decomp/src/libultra/n_audio/n_synallocvoice.c    # Voice allocation + stealing
+    decomp/src/libultra/n_audio/n_synfreevoice.c     # Voice free
+    decomp/src/libultra/n_audio/n_syndelete.c        # Synth delete
+    decomp/src/libultra/n_audio/n_synsetfxmix.c      # Voice FX mix
+    decomp/src/libultra/n_audio/n_synsetpan.c        # Voice pan
+    decomp/src/libultra/n_audio/n_synsetpitch.c      # Voice pitch
+    decomp/src/libultra/n_audio/n_synsetpriority.c   # Voice priority
+    decomp/src/libultra/n_audio/n_synsetvol.c        # Voice volume
+    decomp/src/libultra/n_audio/n_synstartvoiceparam.c # Voice start with params
+    decomp/src/libultra/n_audio/n_synstopvoice.c     # Voice stop
+    decomp/src/libultra/n_audio/n_cspplay.c          # CSP play
+    decomp/src/libultra/n_audio/n_cspsetbank.c       # CSP set bank
+    decomp/src/libultra/n_audio/n_cspsetfxmix.c      # CSP set FX mix
+    decomp/src/libultra/n_audio/n_cspsetpriority.c   # CSP set priority
+    decomp/src/libultra/n_audio/n_cspsetseq.c        # CSP set sequence
+    decomp/src/libultra/n_audio/n_cspsetvol.c        # CSP set volume
+    decomp/src/libultra/n_audio/n_cspstop.c          # CSP stop
+    decomp/src/libultra/n_audio/n_seq.c              # Sequence data reader
+    decomp/src/libultra/n_audio/n_seqplayer.c        # Sequence player voice handler
+    decomp/src/libultra/n_audio/n_seqpgetchlvol.c    # Get channel volume
+    decomp/src/libultra/n_audio/n_seqpgetvol.c       # Get master volume
+    decomp/src/libultra/audio/cents2ratio.c          # alCents2Ratio — pitch conversion
 )
 target_sources(ssb64_game PRIVATE ${SSB64_NAUDIO_PORT})
 
 target_compile_definitions(ssb64_game PRIVATE ${SSB64_COMPILE_DEFS})
 
 target_include_directories(ssb64_game PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include    # Custom C headers (shadows system headers)
-    ${CMAKE_CURRENT_SOURCE_DIR}/src        # Game headers
-    ${CMAKE_CURRENT_SOURCE_DIR}/port       # Port headers (coroutine.h, etc.)
-    ${CMAKE_CURRENT_SOURCE_DIR}/debug_tools # Acmd trace (mixer.h calls acmd_trace_log_cmd)
+    ${CMAKE_CURRENT_SOURCE_DIR}/include          # Port-tree generated headers (reloc_data.h)
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/include   # Decomp C headers (shadows system headers)
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src       # Decomp game module headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/port             # Port headers (coroutine.h, etc.)
+    ${CMAKE_CURRENT_SOURCE_DIR}/debug_tools      # Acmd trace (mixer.h calls acmd_trace_log_cmd)
 )
 
 # Clang 16+ promoted several historically-warning diagnostics to errors by
@@ -344,15 +390,20 @@ if (NOT MSVC)
         -Werror=return-type
     )
     # Clang-only diagnostics. -Wincompatible-library-redeclaration is
-    # Clang-specific; -Wreturn-mismatch / -Wconstant-conversion /
-    # -Wtautological-constant-out-of-range-compare exist in modern Clang
-    # but only landed in GCC 14+ (or never).
+    # Clang-specific. -Wconstant-conversion / -Wtautological-constant-out-of-range-compare
+    # are Clang flags GCC may not accept on older releases.
+    #
+    # -Wreturn-mismatch is a GCC 14+ diagnostic; Clang has no -Werror=return-mismatch
+    # spelling (it warns as an unknown option), so apply that promotion on GCC only.
     if (CMAKE_C_COMPILER_ID MATCHES "Clang")
         target_compile_options(ssb64_game PRIVATE
             -Werror=incompatible-library-redeclaration
-            -Werror=return-mismatch
             -Wno-constant-conversion
             -Wno-tautological-constant-out-of-range-compare
+        )
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "14")
+        target_compile_options(ssb64_game PRIVATE
+            -Werror=return-mismatch
         )
     endif()
 endif()
@@ -401,7 +452,10 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE ${SSB64_COMPILE_DEFS})
 ################################################################################
 
 target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    # NOTE: Do NOT add decomp/include here. The C decomp shim headers (stdlib.h,
+    # stddef.h, ...) shadow the C++ standard library when picked up by port/*.cpp,
+    # producing libc++ <cstdlib> errors. Only ssb64_game (C decomp) consumes them.
+    ${CMAKE_CURRENT_SOURCE_DIR}/decomp/src       # Decomp game module headers (sys/, ft/, sc/, ...)
     ${CMAKE_CURRENT_SOURCE_DIR}/port
     ${CMAKE_CURRENT_SOURCE_DIR}/debug_tools
 )
@@ -415,6 +469,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
 else()
     add_dependencies(${PROJECT_NAME} libultraship TorchExternal)
 endif()
+add_dependencies(ssb64_game GenerateCreditsAssets)
 target_link_libraries(${PROJECT_NAME} PRIVATE libultraship)
 
 ################################################################################
@@ -534,15 +589,47 @@ if(NOT SSB64_BASEROM)
 endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
-    add_custom_target(ExtractAssets
-        DEPENDS TorchExternal PrepareBuildInputs GenerateF3DO2R
-        COMMAND ${TORCH_EXECUTABLE} o2r ${SSB64_BASEROM} -s ${CMAKE_SOURCE_DIR} -d ${CMAKE_SOURCE_DIR}
-        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/BattleShip.o2r
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>/BattleShip.o2r
-        COMMENT "Extracting assets from ${SSB64_BASEROM} into O2R archive"
-    )
+    # Two configurations:
+    #
+    #   (a) Baserom present (typical dev / Torch-extract first-run): declare the
+    #       o2r as an add_custom_command(OUTPUT ...) so downstream rules that
+    #       DEPENDS on it as a file (notably Battle-ShipYard's passthrough_reloc
+    #       commands) connect to this producer through CMake's file-level
+    #       dependency graph. The wrapping custom_target keeps
+    #       `cmake --build . --target ExtractAssets` working.
+    #
+    #   (b) Baserom absent (CI release pipeline never ships the copyrighted ROM):
+    #       provide a stub ExtractAssets target that fails with a clear error if
+    #       invoked, but does NOT register the file-level rule. Without the rule
+    #       Ninja correctly skips the source-compile pipeline (which transitively
+    #       depends on the o2r) instead of erroring with "no rule to make target".
+    #       Any caller that genuinely needs the o2r will hit ExtractAssets and
+    #       get the explanatory error.
+    #
+    # `finalize_battleship_from_source` below additionally gates on the baserom,
+    # so case (b) doesn't even register the source-compile target.
+    if(EXISTS "${SSB64_BASEROM}")
+        add_custom_command(
+            OUTPUT ${CMAKE_SOURCE_DIR}/BattleShip.o2r
+            DEPENDS TorchExternal PrepareBuildInputs GenerateF3DO2R ${SSB64_BASEROM}
+            COMMAND ${TORCH_EXECUTABLE} o2r ${SSB64_BASEROM} -s ${CMAKE_SOURCE_DIR} -d ${CMAKE_SOURCE_DIR}
+            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/BattleShip.o2r
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>/BattleShip.o2r
+            COMMENT "Extracting assets from ${SSB64_BASEROM} into O2R archive"
+        )
+        add_custom_target(ExtractAssets DEPENDS ${CMAKE_SOURCE_DIR}/BattleShip.o2r)
+    else()
+        add_custom_target(ExtractAssets
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "ERROR: ExtractAssets requires baserom.us.{z64,n64,v64} in source root (${CMAKE_SOURCE_DIR})"
+            COMMAND ${CMAKE_COMMAND} -E false
+            COMMENT "ExtractAssets stub — baserom missing"
+        )
+        message(STATUS "BattleShip.o2r: baserom absent — ExtractAssets stub installed; "
+                       "source-compile pipeline will be disabled (released artifacts ship without .fromsource.o2r)")
+    endif()
 
     add_custom_target(GenerateBattleShipO2R
         DEPENDS ExtractAssets
@@ -554,4 +641,39 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
         COMMAND ${TORCH_EXECUTABLE} pack ${CMAKE_SOURCE_DIR}/assets ${CMAKE_SOURCE_DIR}/ssb64.o2r o2r
         COMMENT "Packing port-specific assets into ssb64.o2r"
     )
+
+    ################################################################################
+    # RelocData compile-from-source pipeline (Battle-ShipYard modkit)
+    #
+    # When a compatible toolchain is available (LLVM/clang or VS x86 cl.exe via
+    # vcvars32), builds BattleShip.fromsource.o2r alongside the executable.
+    # Loaded ahead of BattleShip.o2r at runtime when SSB64_RELOC_FROMSOURCE=1,
+    # shadowing Torch entries for matching paths. With no toolchain the entire
+    # subsystem is skipped — runtime falls back to Torch-extracted reloc data
+    # exactly as before.
+    #
+    # The pipeline lives in the Battle-ShipYard submodule
+    # (https://github.com/JRickey/Battle-ShipYard). Bumping the submodule
+    # pointer is how we ship modkit changes; nothing in this repo's CMakeLists
+    # needs to change for routine modkit updates. The contract is the variables
+    # set below — DECOMP_DIR for the source tree, RELOC_TABLE for the file_id
+    # mapping. Compiler discovery, eligible-set generation, per-file build
+    # rules, and finalize_battleship_from_source all live in the submodule.
+    ################################################################################
+
+    set(RELOCDATA_DECOMP_DIR  "${CMAKE_SOURCE_DIR}/decomp")
+    set(RELOCDATA_RELOC_TABLE "${CMAKE_SOURCE_DIR}/port/resource/RelocFileTable.cpp")
+    # ExtractAssets writes BattleShip.o2r to ${CMAKE_SOURCE_DIR}; tell the modkit
+    # to make BuildBattleShipFromSource depend on it so the source-compile +
+    # passthrough commands don't race on a fresh `cmake -B && cmake --build` flow
+    # (the failure mode that broke v0.7.6-beta packaging).
+    set(RELOCDATA_BATTLESHIP_O2R_TARGET ExtractAssets)
+    include(Battle-ShipYard/cmake/RelocData.cmake)
+
+    if(RELOCDATA_CC AND EXISTS "${SSB64_BASEROM}")
+        finalize_battleship_from_source(${CMAKE_BINARY_DIR}/BattleShip.fromsource.o2r)
+    elseif(RELOCDATA_CC)
+        message(STATUS "RelocData: baserom absent — BuildBattleShipFromSource skipped "
+                       "(release CI / no-rom builds; runtime falls back to Torch-passthrough reloc data)")
+    endif()
 endif()

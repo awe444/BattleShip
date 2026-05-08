@@ -41,7 +41,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC_DIR = ROOT / "src"
+# Decomp source lives in the `decomp/` submodule (port-patches branch). The
+# pre-submodule path was ROOT/src; it's still on disk during the submodule
+# migration but slated for deletion. Prefer the submodule path when present.
+SRC_DIR = (ROOT / "decomp" / "src") if (ROOT / "decomp" / "src").is_dir() else (ROOT / "src")
 HEADER_OUT = ROOT / "include" / "reloc_data.h"
 SYMBOLS_TXT = ROOT / "tools" / "reloc_data_symbols.us.txt"
 
@@ -66,6 +69,21 @@ def collect_src_symbols() -> set[str]:
         for match in SYMBOL_RE.findall(text):
             symbols.add(match)
     return symbols
+
+
+def intptr_emit_value(literal: str) -> str:
+    """Normalize a symbols-table value to a decimal string for ((intptr_t)VALUE).
+
+    The table uses ``0x…`` hex or plain decimal. Emitting decimal avoids a Clang
+    18.x frontend crash seen with some ``((intptr_t)0x…)`` forms inside large
+    brace initializers after macro expansion from this header.
+    """
+    s = literal.strip()
+    if s.startswith(("0x", "0X")):
+        return str(int(s, 16))
+    if len(s) > 1 and s[0] == "0" and s[1] in "01234567":
+        return str(int(s, 8))
+    return str(int(s, 10))
 
 
 def parse_symbol_values() -> dict[str, str]:
@@ -137,10 +155,10 @@ def write_header(values: dict[str, str], extra_stubs: set[str]) -> None:
         "",
     ]
 
-    # Use `((intptr_t)<literal>)` for every entry so downstream tools
-    # (tools/generate_yamls.py) see a consistent regex-friendly format.
+    # Use `((intptr_t)<decimal>)` for every entry so downstream tools
+    # (tools/generate_yamls.py) can parse FileID lines and Clang stays stable.
     for name in table_names:
-        lines.append(f"#define {name} ((intptr_t){values[name]})")
+        lines.append(f"#define {name} ((intptr_t){intptr_emit_value(values[name])})")
 
     if stub_names:
         lines.append("")
@@ -149,7 +167,18 @@ def write_header(values: dict[str, str], extra_stubs: set[str]) -> None:
             lines.append(f"#define {name} ((intptr_t)0) /* STUBBED */")
 
     lines += ["", "#endif /* _RELOC_DATA_H_ */", ""]
-    HEADER_OUT.write_text("\n".join(lines), encoding="utf-8")
+    new_content = "\n".join(lines)
+    # Skip the write when the existing file already has identical contents.
+    # The output is ~340 KB and regenerated on every build trigger; a stale
+    # editor / reader (pylance, antivirus) holding even a brief shared lock
+    # would otherwise crash the build with PermissionError.
+    if HEADER_OUT.exists():
+        try:
+            if HEADER_OUT.read_text(encoding="utf-8") == new_content:
+                return
+        except OSError:
+            pass
+    HEADER_OUT.write_text(new_content, encoding="utf-8")
 
 
 def main() -> None:

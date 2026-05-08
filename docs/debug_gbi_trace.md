@@ -1,23 +1,23 @@
 # Debug Tools — GBI Display List Trace & Diff
 
-The `debug_tools/` directory contains tools for capturing and comparing F3DEX2/RDP display list commands between the PC port and a Mupen64Plus emulator. This enables data-driven rendering debugging without relying on visual descriptions.
+The `debug_tools/` directory contains tools for capturing F3DEX2/RDP display list commands from the PC port and diffing them against a reference trace. This enables data-driven rendering debugging without relying on visual descriptions.
 
 ## Architecture
 
 ```
 Port (Fast3D interpreter)  →  debug_traces/port_trace.gbi
                                                               → gbi_diff.py → structured diff
-Empen (M64P trace plugin)  →  debug_traces/emu_trace.gbi
+Reference trace            →  debug_traces/emu_trace.gbi
 ```
 
-Both sides produce identically-formatted trace files. The Python diff tool aligns by frame and reports divergences at the GBI command level.
+Both sides produce identically-formatted trace files. The Python diff tool aligns by frame and reports divergences at the GBI command level. Reference traces previously came from an in-tree Mupen64Plus RSP plugin; that plugin was removed in the licensing-compliance pass (it was derived from GPLv2 mupen64plus headers and is incompatible with this repository's MIT scope). Capture references from a separately-licensed external tool if needed.
 
 ## Port-Side Trace (`debug_tools/gbi_trace/`)
 
 Captures every GBI command as Fast3D's interpreter executes it.
 
 **Files:**
-- `gbi_decoder.h` / `gbi_decoder.c` — Shared F3DEX2/RDP command decoder (pure C, used by both port and M64P plugin)
+- `gbi_decoder.h` / `gbi_decoder.c` — Shared F3DEX2/RDP command decoder (pure C)
 - `gbi_trace.h` / `gbi_trace.c` — Port-side trace lifecycle (frame begin/end, file I/O)
 
 **How to enable:**
@@ -43,26 +43,20 @@ SSB64_GBI_TRACE_DIR=my_traces SSB64_GBI_TRACE=1 ./build/Debug/ssb64.exe
 === END FRAME 0 — 3 commands ===
 ```
 
-## Mupen64Plus Trace Plugin (`debug_tools/m64p_trace_plugin/`)
+## Reference traces
 
-A minimal M64P video plugin that renders nothing but captures display lists from RDRAM.
+The in-tree Mupen64Plus RSP trace plugin (`debug_tools/m64p_trace_plugin/`) and audio-dump plugin (`debug_tools/m64p_audio_dump_plugin/`) were removed in the licensing-compliance pass: they were derived from GPLv2 mupen64plus headers and could not live under this repository's MIT scope. If you need an emulator-side reference trace at `debug_traces/emu_trace.gbi` (matching the format produced by `debug_tools/gbi_trace/`), build a separately-licensed capture tool out of tree.
 
-**Build (standalone):**
+## Capture-and-diff harness (`debug_tools/gbi_diff/capture_and_diff.sh`)
+
+Glue script that runs the port for N seconds with `SSB64_GBI_TRACE=1`, then diffs against an emulator reference. See the script header for full usage; quick form:
+
 ```bash
-cd debug_tools/m64p_trace_plugin
-cmake -S . -B build && cmake --build build
-# Produces: mupen64plus-video-trace.dll (or .so)
+debug_tools/gbi_diff/capture_and_diff.sh intro_first 10
+# emits debug_traces/intro_first_port.gbi  +  intro_first_diff.txt
+# expects an emulator trace at debug_traces/intro_first_emu.gbi
+# (or falls back to debug_traces/emu_trace.gbi from a prior mupen64plus run)
 ```
-
-**Usage with Mupen64Plus:**
-```bash
-mupen64plus --gfx /path/to/mupen64plus-video-trace.dll baserom.us.z64
-
-# Optional: control output
-M64P_TRACE_DIR=debug_traces M64P_TRACE_FRAMES=60 mupen64plus --gfx ...
-```
-
-**Output:** `emu_trace.gbi` (or `$M64P_TRACE_DIR/emu_trace.gbi`)
 
 ## Diff Tool (`debug_tools/gbi_diff/gbi_diff.py`)
 

@@ -43,6 +43,9 @@ void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line);
  */
 void *portRelocTryResolvePointer(uint32_t token);
 
+/** Current token-table generation (top bits of valid tokens). */
+uint32_t portRelocTokenTableGeneration(void);
+
 /**
  * Reset the token table (e.g. on scene change when all files are unloaded).
  */

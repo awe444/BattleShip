@@ -42,13 +42,13 @@ fail() { printf '\033[31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
 [[ "$(uname -s)" == "Darwin" ]] || fail "package-macos.sh runs on macOS only"
 
 # ── 0. Run codegen scripts that don't need the ROM ──
-# Encoded credit files are gitignored (input text is in src/credits/),
+# Encoded credit files are gitignored (input text is in decomp/src/credits/),
 # so a fresh checkout (CI or otherwise) must run the encoder before
 # cmake builds scstaffroll.c. ROM-independent — same step CMake's
 # GenerateCreditsAssets target runs.
 step "Encoding credits text"
 (
-    cd "$ROOT/src/credits"
+    cd "$ROOT/decomp/src/credits"
     for f in staff.credits.us.txt titles.credits.us.txt; do
         python3 "$ROOT/tools/creditsTextConverter.py" "$f" > /dev/null
     done
@@ -101,9 +101,48 @@ cp "$ROOT/assets/icon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # TTFs at Contents/Resources/assets/custom/fonts/ matches first
 # iteration. Without this the menu silently falls back to ImGui's
 # default font.
+#
+# OFL 1.1 §1 requires the license text to accompany each redistributed
+# font file, so the *-OFL.txt files ship alongside the .ttf they govern.
 mkdir -p "$APP/Contents/Resources/assets/custom/fonts"
 cp "$ROOT/assets/custom/fonts/Montserrat-Regular.ttf"  "$APP/Contents/Resources/assets/custom/fonts/"
+cp "$ROOT/assets/custom/fonts/Montserrat-OFL.txt"      "$APP/Contents/Resources/assets/custom/fonts/"
 cp "$ROOT/assets/custom/fonts/Inconsolata-Regular.ttf" "$APP/Contents/Resources/assets/custom/fonts/"
+cp "$ROOT/assets/custom/fonts/Inconsolata-OFL.txt"     "$APP/Contents/Resources/assets/custom/fonts/"
+
+# Project LICENSE + verbatim upstream LICENSE files for the submodules
+# whose compiled code is in this .app. MIT requires the upstream
+# copyright + permission notice to ride along with redistributed copies.
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+mkdir -p "$APP/Contents/Resources/licenses"
+if [[ -f "$ROOT/libultraship/LICENSE" ]]; then
+    cp "$ROOT/libultraship/LICENSE" "$APP/Contents/Resources/licenses/libultraship-LICENSE.txt"
+else
+    fail "libultraship/LICENSE not found — submodules not initialized?"
+fi
+if [[ -f "$ROOT/torch/LICENSE" ]]; then
+    cp "$ROOT/torch/LICENSE" "$APP/Contents/Resources/licenses/torch-LICENSE.txt"
+else
+    fail "torch/LICENSE not found — submodules not initialized?"
+fi
+cat > "$APP/Contents/Resources/licenses/README.txt" <<'EOF'
+This directory contains license texts for third-party components whose
+compiled code is included in this BattleShip distribution:
+
+  - libultraship-LICENSE.txt  (MIT, Copyright (c) 2022 kenix3)
+  - torch-LICENSE.txt         (MIT, Copyright (c) 2023 Lywx)
+
+Bundled font licenses (SIL Open Font License 1.1) live alongside the
+font files at assets/custom/fonts/.
+
+The BattleShip project's own MIT license is in ../LICENSE in this bundle.
+
+Additional libraries dynamically linked at runtime (SDL2, GLEW, libzip,
+nlohmann_json, tinyxml2, spdlog, fmt, hidapi-via-libultraship) are
+distributed under their respective upstream licenses (zlib, modified
+BSD, BSD-3-Clause, MIT). Refer to those upstream packages for full
+license texts.
+EOF
 
 # ── 4. Info.plist ──
 # Minimal but sufficient: bundle ID, version, executable name, high-DPI flag.

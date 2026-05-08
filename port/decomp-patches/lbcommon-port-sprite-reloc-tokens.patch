@@ -1,0 +1,45 @@
+diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
+index 3f04802e8..22a0c965a 100644
+--- a/src/lb/lbcommon.c
++++ b/src/lb/lbcommon.c
+@@ -10,6 +10,7 @@ extern void func_800267F4_273F4(void *arg0);
+ #ifdef PORT
+ extern void port_log(const char *fmt, ...);
+ extern void portFixupSprite(void *sprite);
++extern void portFixupSpriteRelocTokensOnly(void *sprite);
+ extern void portFixupBitmap(void *bitmap);
+ extern void portFixupBitmapArray(void *bitmaps, unsigned int count);
+ extern void portFixupSpriteBitmapData(void *sprite, void *bitmaps);
+@@ -2389,9 +2390,21 @@ void lbCommonDecodeSpriteBitmapsSiz4b(Sprite *sprite)
+ {
+     s32 n;
+     Bitmap *bitmap;
+-    
++
++#ifdef PORT
++    /* Half-swap repair can succeed only after all pointers for this load are
++     * registered; portFixupSprite may have run earlier in the same frame. */
++    portFixupSpriteRelocTokensOnly(sprite);
++#endif
++
+     for (n = sprite->nbitmaps, bitmap = (Bitmap*)PORT_RESOLVE(sprite->bitmap); n > 0; n--)
+     {
++#ifdef PORT
++        if (bitmap == NULL)
++        {
++            return;
++        }
++#endif
+         s32 res = (bitmap[n - 1].width_img / 2) * bitmap[n - 1].actualHeight;
+ 
+         lbCommonDecodeBitmapSiz4b
+@@ -3055,6 +3068,9 @@ SObj* lbCommonMakeSObjForGObj(GObj *gobj, Sprite *sprite)
+     // Fix byte order for Sprite + its Bitmap array after blanket u32 swap.
+     // Must happen before ANY field access (e.g. bmsiz check below).
+     portFixupSprite(sprite);
++    /* Reloc tokens may become resolvable only after sibling pointers register;
++     * retry before first PORT_RESOLVE on sprite->bitmap. */
++    portFixupSpriteRelocTokensOnly(sprite);
+     {
+         Bitmap *bitmaps = (Bitmap*)PORT_RESOLVE(sprite->bitmap);
+         if (bitmaps != NULL)

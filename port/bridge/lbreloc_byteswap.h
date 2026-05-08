@@ -77,6 +77,13 @@ void portFixupRawTextureBSWAP32(void *base, size_t bytes);
 void portFixupSprite(void *sprite);
 
 /**
+ * Re-run only reloc-token half-swap repair on Sprite token words (LUT,
+ * bitmap, rsp_dl, rsp_dl_next). Safe to call after portRelocRegisterPointer
+ * / generation catches up — e.g. between portFixupSprite and PORT_RESOLVE.
+ */
+void portFixupSpriteRelocTokensOnly(void *sprite);
+
+/**
  * Fix byte order for a Bitmap struct (16 bytes) after blanket u32 swap.
  *
  * rotate16 for s16 pair words (width/width_img, s/t, actualHeight/LUToffset)

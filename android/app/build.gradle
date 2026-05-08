@@ -43,8 +43,18 @@ android {
         versionName "1.0.1"
         externalNativeBuild {
             cmake {
-                 arguments "-DSDL_SHARED=ON", "-DANDROID_STL=c++_static", "-DHAVE_LD_VERSION_SCRIPT=OFF",'-DUSE_OPENGLES=ON'
-                 abiFilters 'arm64-v8a'
+                def cmakeArgs = [
+                        "-DSDL_SHARED=ON",
+                        "-DANDROID_STL=c++_static",
+                        "-DHAVE_LD_VERSION_SCRIPT=OFF",
+                        "-DUSE_OPENGLES=ON",
+                ]
+                // Optional: ./gradlew :app:assembleRelease -PlusSpdlogTrace (keeps TRACE/DEBUG macros in release native)
+                if (project.hasProperty('lusSpdlogTrace')) {
+                    cmakeArgs.add("-DSPDLOG_MIN_CUTOFF=SPDLOG_LEVEL_TRACE")
+                }
+                arguments(*cmakeArgs)
+                abiFilters 'arm64-v8a'
             }
         }
         
@@ -67,6 +77,12 @@ android {
             jniDebuggable true
             minifyEnabled false
             shrinkResources false
+            // Keep SPDLOG_TRACE/SPDLOG_DEBUG call sites in native Debug (libultraship SPDLOG_ACTIVE_LEVEL).
+            externalNativeBuild {
+                cmake {
+                    arguments "-DSPDLOG_MIN_CUTOFF=SPDLOG_LEVEL_TRACE"
+                }
+            }
         }
         release {
             debuggable false
