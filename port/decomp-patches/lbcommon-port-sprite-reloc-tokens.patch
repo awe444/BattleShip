@@ -1,8 +1,7 @@
 diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
-index 3f04802e8..22a0c965a 100644
 --- a/src/lb/lbcommon.c
 +++ b/src/lb/lbcommon.c
-@@ -10,6 +10,7 @@ extern void func_800267F4_273F4(void *arg0);
+@@ -10,6 +10,7 @@
  #ifdef PORT
  extern void port_log(const char *fmt, ...);
  extern void portFixupSprite(void *sprite);
@@ -10,7 +9,7 @@ index 3f04802e8..22a0c965a 100644
  extern void portFixupBitmap(void *bitmap);
  extern void portFixupBitmapArray(void *bitmaps, unsigned int count);
  extern void portFixupSpriteBitmapData(void *sprite, void *bitmaps);
-@@ -2389,9 +2390,21 @@ void lbCommonDecodeSpriteBitmapsSiz4b(Sprite *sprite)
+@@ -2389,15 +2390,42 @@
  {
      s32 n;
      Bitmap *bitmap;
@@ -32,8 +31,85 @@ index 3f04802e8..22a0c965a 100644
 +#endif
          s32 res = (bitmap[n - 1].width_img / 2) * bitmap[n - 1].actualHeight;
  
++#ifdef PORT
++        /* Per-Bitmap .buf can resolve to NULL when its reloc token is stale
++         * (fresh sprite landing at recycled heap address before bitmap[].buf
++         * re-registers). Retry the per-bitmap fixup and skip the decode
++         * rather than feeding (NULL + res/2 - 1) into lbCommonDecodeBitmapSiz4b
++         * — that walks bogus pointers and SEGVs. Repro: mnMessageMakeMessage
++         * -> lbCommonMakeSObjForGObj -> here, with bitmap_csr=0x40fff /
++         * bitmap_buf=0x81fff / bitmap_start=0x0 (PR comment 4410476377). */
++        portFixupBitmap(&bitmap[n - 1]);
++        if (PORT_RESOLVE(bitmap[n - 1].buf) == NULL)
++        {
++            continue;
++        }
++#endif
++
          lbCommonDecodeBitmapSiz4b
-@@ -3055,6 +3068,9 @@ SObj* lbCommonMakeSObjForGObj(GObj *gobj, Sprite *sprite)
+         (
+             (u8*) ((u8*)PORT_RESOLVE(bitmap[n - 1].buf) + (res / 2) - 1),
+             (u8*) ((u8*)PORT_RESOLVE(bitmap[n - 1].buf) + (res - 1)),
+             (u8*) ((u8*)PORT_RESOLVE(bitmap[n - 1].buf))
+         );
+     }
+@@ -2813,7 +2826,20 @@
+ 
+         case G_IM_FMT_CI:
+             gDPSetTextureLUT(dl++, G_TT_RGBA16);
++#ifdef PORT
++            /* Retry token half-swap repair so a sibling-pointer registration
++             * that lands after pass1 doesn't leave sprite->LUT stale here.
++             * Skip the TLUT load on stale tokens — feeding NULL into
++             * gDPLoadTLUT bakes a bogus pointer into the F3D DL and the
++             * interpreter SEGVs (lbcommon.c:3013 -> Fast::gfx_step). */
++            portFixupSpriteRelocTokensOnly(sprite);
++            { void *_lut = PORT_RESOLVE(sprite->LUT);
++              if (_lut != NULL) {
++                  gDPLoadTLUT(dl++, sprite->nTLUT, sprite->startTLUT + 256, _lut);
++              } }
++#else
+             gDPLoadTLUT(dl++, sprite->nTLUT, sprite->startTLUT + 256, PORT_RESOLVE(sprite->LUT));
++#endif
+             gDPLoadSync(dl++);
+ 
+             /* fallthrough */
+@@ -2842,11 +2868,22 @@
+         break;
+ 
+     case G_IM_FMT_CI:
++#ifdef PORT
++        /* Same stale-LUT guard as the unconditional CI path above. */
++        portFixupSpriteRelocTokensOnly(sprite);
++        { void *_lut = PORT_RESOLVE(sprite->LUT);
++          if (_lut != NULL && _lut != sLBCommonPrevSpriteLUT)
++          {
++              gDPLoadTLUT(dl++, sprite->nTLUT, sprite->startTLUT + 256, _lut);
++              gDPLoadSync(dl++);
++          } }
++#else
+         if (PORT_RESOLVE(sprite->LUT) != sLBCommonPrevSpriteLUT)
+         {
+             gDPLoadTLUT(dl++, sprite->nTLUT, sprite->startTLUT + 256, PORT_RESOLVE(sprite->LUT));
+             gDPLoadSync(dl++);
+         }
++#endif
+         break;
+     }
+     dls[0] = dl;
+@@ -3008,6 +3045,11 @@
+ // 0x800CCED8
+ void lbCommonSetExternSpriteParams(Sprite *sprite)
+ {
++#ifdef PORT
++    /* Retry half-swap fixup so a sibling-pointer registration that lands
++     * after pass1 doesn't leave sprite->LUT as a stale token here. */
++    portFixupSpriteRelocTokensOnly(sprite);
++#endif
+     sLBCommonExternSpriteAttr = sprite->attr;
+     sLBCommonExternBitmapFmt = sprite->bmfmt;
+     sLBCommonPrevSpriteLUT = PORT_RESOLVE(sprite->LUT);
+@@ -3055,6 +3097,9 @@
      // Fix byte order for Sprite + its Bitmap array after blanket u32 swap.
      // Must happen before ANY field access (e.g. bmsiz check below).
      portFixupSprite(sprite);
