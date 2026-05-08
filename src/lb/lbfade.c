@@ -69,7 +69,15 @@ void lbFadeProcDisplay(GObj *gobj)
     gDPSetPrimColor(gSYTaskmanDLHeads[0]++, 0, 0, sLBFadeColor.r, sLBFadeColor.g, sLBFadeColor.b, alpha);
     gDPSetCombineMode(gSYTaskmanDLHeads[0]++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
     gDPSetRenderMode(gSYTaskmanDLHeads[0]++, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+#ifdef PORT
+    /* Cover the full frame so the screen-fade overlay reaches the
+     * framebuffer edges that the expanded viewport (rdp.c
+     * syRdpSetViewport) now draws into.  Otherwise scene transitions
+     * leave a faint un-faded ring at the original 10-px inset. */
+    gDPFillRectangle(gSYTaskmanDLHeads[0]++, 0, 0, GS_SCREEN_WIDTH_DEFAULT, GS_SCREEN_HEIGHT_DEFAULT);
+#else
     gDPFillRectangle(gSYTaskmanDLHeads[0]++, 10, 10, GS_SCREEN_WIDTH_DEFAULT - 10, GS_SCREEN_HEIGHT_DEFAULT - 10);
+#endif
     gDPPipeSync(gSYTaskmanDLHeads[0]++);
 }
 

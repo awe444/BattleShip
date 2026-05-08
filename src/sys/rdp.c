@@ -68,8 +68,32 @@ Vp gSYRdpViewport;
 // 0x80007080
 void syRdpSetViewport(Vp *viewport, f32 ulx, f32 uly, f32 lrx, f32 lry)
 {
-    f32 h = (ulx + lrx) / 2.0F;
-    f32 v = (uly + lry) / 2.0F;
+    f32 h;
+    f32 v;
+
+#ifdef PORT
+    /* SSB64 emits the standard 10-pixel CRT-overscan-safe inset
+     * (10,10)-(310,230) inside the 320x240 frame for every gameplay,
+     * cutscene, and menu camera (see hundreds of call sites such as
+     * mvopening*.c, mvending.c, ifcommon.c).  On a modern flat panel that
+     * inset just produces unnecessary black borders ~3% wide on each
+     * side.  Detect the canonical extents and expand them to the full
+     * frame.  Other extents (e.g. the magnified ifcommon viewport) are
+     * left untouched.  Companion changes in syRdpResetSettings,
+     * gcSetCameraScissor, lbCommonDrawSprite, and lbFadeProcDisplay drop
+     * the matching scissor and fade insets so the expanded viewport
+     * actually reaches the framebuffer edges. */
+    if (ulx == 10.0F && uly == 10.0F && lrx == 310.0F && lry == 230.0F)
+    {
+        ulx = 0.0F;
+        uly = 0.0F;
+        lrx = (f32) GS_SCREEN_WIDTH_DEFAULT;
+        lry = (f32) GS_SCREEN_HEIGHT_DEFAULT;
+    }
+#endif
+
+    h = (ulx + lrx) / 2.0F;
+    v = (uly + lry) / 2.0F;
 
     viewport->vp.vscale[0] = ((s32) ((lrx - h) * 4.0F)) & 0xFFFF;
     viewport->vp.vscale[1] = ((s32) ((lry - v) * 4.0F)) & 0xFFFF;
@@ -105,10 +129,20 @@ void syRdpResetSettings(Gfx **dls)
     (
         dl++,
         G_SC_NON_INTERLACE,
+#ifdef PORT
+        /* Drop the 10-pixel overscan inset on the per-frame default
+         * scissor so the expanded viewport from syRdpSetViewport reaches
+         * the framebuffer edges. */
+        0,
+        0,
+        gSYVideoResWidth,
+        gSYVideoResHeight
+#else
         10 * (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT),
         10 * (gSYVideoResHeight / GS_SCREEN_HEIGHT_DEFAULT),
         gSYVideoResWidth - 10 * (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT),
         gSYVideoResHeight - 10 * (gSYVideoResHeight / GS_SCREEN_HEIGHT_DEFAULT)
+#endif
     );
     if (dSYRdpFuncLights != NULL)
     { 

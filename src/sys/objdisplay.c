@@ -341,6 +341,25 @@ static void gcLogSuspiciousDLPointer(const char *issue, DObj *dobj, unsigned lon
 //                               //
 // // // // // // // // // // // //
 
+#ifdef PORT
+/* Per-camera scissor inset.  Decomp default is 10 pixels on every side
+ * to match SSB64's CRT-overscan-safe authoring.  On PORT we zero this
+ * so the expanded viewport from syRdpSetViewport (rdp.c) is not
+ * re-clamped back to the (10,10)-(310,230) inset by func_80016000 /
+ * func_8001663C / func_80018134, which derive ulx/uly/lrx/lry from the
+ * viewport vscale/vtrans and then clamp through these globals. */
+// 0x8003B930
+s32 dGCCameraScissorTop = 0;
+
+// 0x8003B934
+s32 dGCCameraScissorBottom = 0;
+
+// 0x8003B938
+s32 dGCCameraScissorLeft = 0;
+
+// 0x8003B93C
+s32 dGCCameraScissorRight = 0;
+#else
 // 0x8003B930
 s32 dGCCameraScissorTop = 10;
 
@@ -352,6 +371,7 @@ s32 dGCCameraScissorLeft = 10;
 
 // 0x8003B93C
 s32 dGCCameraScissorRight = 10;
+#endif
 
 // // // // // // // // // // // //
 //                               //

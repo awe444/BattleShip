@@ -3202,6 +3202,11 @@ void lbCommonDrawSprite(GObj *camera_gobj)
     s32 lrx = (viewport->vtrans[0] / 4) + (viewport->vscale[0] / 4);
     s32 lry = (viewport->vtrans[1] / 4) + (viewport->vscale[1] / 4);
     
+#ifndef PORT
+    /* CRT-overscan-safe 10-pixel inset.  See objdisplay.c
+     * dGCCameraScissor* and rdp.c syRdpSetViewport for the parallel
+     * PORT-only changes that drop this inset to fill the full 4:3
+     * frame on modern displays. */
     if (ulx < (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT) * 10)
     {
         ulx = (gSYVideoResWidth / GS_SCREEN_WIDTH_DEFAULT) * 10;
@@ -3218,6 +3223,7 @@ void lbCommonDrawSprite(GObj *camera_gobj)
     {
         lry = gSYVideoResHeight - ((gSYVideoResHeight / GS_SCREEN_HEIGHT_DEFAULT) * 10);
     }
+#endif
     lbCommonStartSprite(gSYTaskmanDLHeads);
     lbCommonSetSpriteScissor(ulx, lrx, uly, lry);
 
