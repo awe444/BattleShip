@@ -44,6 +44,10 @@
 #define CVAR_TEXTURE_FILTER "gTextureFilter"
 #endif
 
+#ifndef CVAR_TEXTURE_FILTER_2D
+#define CVAR_TEXTURE_FILTER_2D "gTextureFilter2D"
+#endif
+
 #ifndef CVAR_IMGUI_CONTROLLER_NAV
 #define CVAR_IMGUI_CONTROLLER_NAV "gControlNav"
 #endif

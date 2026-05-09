@@ -1,0 +1,66 @@
+diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
+index 9f4a90281..5d7b4b238 100644
+--- a/src/lb/lbcommon.c
++++ b/src/lb/lbcommon.c
+@@ -15,6 +15,10 @@ extern void portFixupBitmapArray(void *bitmaps, unsigned int count);
+ extern void portFixupSpriteBitmapData(void *sprite, void *bitmaps);
+ extern void portDeswizzleDecodedSprite4c(void *sprite, void *bitmaps);
+ extern void portFixupMObjSub(void *mobjsub);
++/* Substitutes G_TF_POINT for the supplied N64 filter when the user has
++ * opted into per-element nearest filtering for 2D / HUD draws.  See
++ * port/render/force_point_filter.h. */
++extern int port_force_2d_filter(int n64_filter);
+ #endif
+ 
+ extern void syInterpCubic(void*, void*, f32);
+@@ -2750,9 +2754,17 @@ void lbCommonPrepSObjAttr(Gfx **dls, SObj *sobj)
+         
+         if (sprite->attr & SP_TEXSHIFT)
+         {
++#ifdef PORT
++            gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_AVERAGE));
++#else
+             gDPSetTextureFilter(dl++, G_TF_AVERAGE);
++#endif
+         }
++#ifdef PORT
++        else gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_BILERP));
++#else
+         else gDPSetTextureFilter(dl++, G_TF_BILERP);
++#endif
+         
+         if (sprite->bmfmt != G_IM_FMT_CI)
+         {
+@@ -2804,12 +2816,20 @@ void lbCommonPrepSObjAttr(Gfx **dls, SObj *sobj)
+             {
+                 if (!(sLBCommonExternSpriteAttr & SP_TEXSHIFT))
+                 {
++#ifdef PORT
++                    gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_AVERAGE));
++#else
+                     gDPSetTextureFilter(dl++, G_TF_AVERAGE);
++#endif
+                 }
+             }
+             else if (sLBCommonExternSpriteAttr & SP_TEXSHIFT)
+             {
++#ifdef PORT
++                gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_BILERP));
++#else
+                 gDPSetTextureFilter(dl++, G_TF_BILERP);
++#endif
+             }
+         }
+     }
+@@ -3170,7 +3190,11 @@ void lbCommonStartSprite(Gfx **dls)
+     gDPSetBlendColor(dl++, 0x00, 0x00, 0x00, 0x08);
+     gDPSetAlphaCompare(dl++, G_AC_THRESHOLD);
+     gDPSetTexturePersp(dl++, G_TP_NONE);
++#ifdef PORT
++    gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_BILERP));
++#else
+     gDPSetTextureFilter(dl++, G_TF_BILERP);
++#endif
+     gDPSetTextureConvert(dl++, G_TC_FILT);
+     gDPSetTextureDetail(dl++, G_TD_CLAMP);
+     gDPSetTextureLOD(dl++, G_TL_TILE);

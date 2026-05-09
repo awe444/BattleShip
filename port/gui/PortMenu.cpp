@@ -53,6 +53,13 @@ static const std::map<int32_t, const char*> kTextureFilteringMap = {
     { Fast::FILTER_NONE, "None" },
 };
 
+// Per-element 2D / HUD filter override (CVAR_TEXTURE_FILTER_2D).  Mirrors
+// PORT_TF2D_FORCE_POINT / PORT_TF2D_MATCH_GLOBAL in port/render/force_point_filter.h.
+static const std::map<int32_t, const char*> kTextureFiltering2DMap = {
+    { 0, "Force None" },
+    { 1, "Match Global" },
+};
+
 // Mirrors dbObjectDisplayMode (src/sys/develop.h). 0 disables the override and
 // returns the engine's normal rendering.
 static const std::map<int32_t, const char*> kHitboxViewMap = {
@@ -288,6 +295,19 @@ void PortMenu::AddMenuSettings() {
         .CVar(CVAR_TEXTURE_FILTER)
         .RaceDisable(false)
         .Options(ComboboxOptions().Tooltip("Sets the active texture filtering mode.").ComboMap(kTextureFilteringMap));
+
+    AddWidget(path, "Texture Filter (HUD / 2D)", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_TEXTURE_FILTER_2D)
+        .RaceDisable(false)
+        .Options(ComboboxOptions()
+                     .Tooltip("Controls filtering for HUD, menus, sprites, title screens, and "
+                              "other 2D elements. \"Force None\" keeps these crisp at all "
+                              "rendering resolutions regardless of the global Texture Filter "
+                              "setting above. \"Match Global\" defers to the global setting "
+                              "(legacy behavior). 3D models, stages, particles, and items always "
+                              "follow the global Texture Filter.")
+                     .ComboMap(kTextureFiltering2DMap)
+                     .DefaultIndex(0));
 
     path.sidebarName = "Gameplay";
     path.column = SECTION_COLUMN_1;
