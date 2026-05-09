@@ -1,0 +1,35 @@
+--- a/src/mn/mncommon/mntitle.c
++++ b/src/mn/mncommon/mntitle.c
+@@ -17,6 +17,12 @@
+ extern void portFixupSprite(void *sprite);
+ extern void portFixupBitmapArray(void *bitmaps, unsigned int count);
+ extern void portFixupSpriteBitmapData(void *sprite, void *bitmaps);
++/* Title-screen animated fire texture should follow the global texture
++ * filter CVar rather than being forced to point filtering by the 2D
++ * sprite library override (it's a soft animated background, not a HUD
++ * sprite). */
++extern void port_force_2d_filter_push_passthrough(void);
++extern void port_force_2d_filter_pop_passthrough(void);
+ #endif
+ 
+ // // // // // // // // // // // //
+@@ -876,6 +882,9 @@
+ 	s32 i;
+ 	SObj *fire_sobj = SObjGetStruct(fire_gobj);
+ 
++#ifdef PORT
++	port_force_2d_filter_push_passthrough();
++#endif
+ 	for (i = 0; i < 2; i++)
+ 	{
+ 		lbCommonPrepSObjAttr(gSYTaskmanDLHeads, fire_sobj);
+@@ -888,6 +897,9 @@
+ 
+ 		fire_sobj = fire_sobj->next;
+ 	}
++#ifdef PORT
++	port_force_2d_filter_pop_passthrough();
++#endif
+ }
+ 
+ // 0x80132A20

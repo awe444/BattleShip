@@ -1,0 +1,88 @@
+diff --git a/src/lb/lbcommon.c b/src/lb/lbcommon.c
+index 9f4a90281..bea9f67fe 100644
+--- a/src/lb/lbcommon.c
++++ b/src/lb/lbcommon.c
+@@ -15,6 +15,11 @@ extern void portFixupBitmapArray(void *bitmaps, unsigned int count);
+ extern void portFixupSpriteBitmapData(void *sprite, void *bitmaps);
+ extern void portDeswizzleDecodedSprite4c(void *sprite, void *bitmaps);
+ extern void portFixupMObjSub(void *mobjsub);
++/* Substitutes G_TF_POINT for the supplied N64 filter when the user has
++ * opted into per-element nearest filtering for 2D / HUD draws.  See
++ * port/render/force_point_filter.h. */
++extern int port_force_2d_filter(int n64_filter);
++extern int port_force_2d_point_filter_enabled(void);
+ #endif
+ 
+ extern void syInterpCubic(void*, void*, f32);
+@@ -2750,9 +2755,17 @@ void lbCommonPrepSObjAttr(Gfx **dls, SObj *sobj)
+         
+         if (sprite->attr & SP_TEXSHIFT)
+         {
++#ifdef PORT
++            gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_AVERAGE));
++#else
+             gDPSetTextureFilter(dl++, G_TF_AVERAGE);
++#endif
+         }
++#ifdef PORT
++        else gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_BILERP));
++#else
+         else gDPSetTextureFilter(dl++, G_TF_BILERP);
++#endif
+         
+         if (sprite->bmfmt != G_IM_FMT_CI)
+         {
+@@ -2804,12 +2817,20 @@ void lbCommonPrepSObjAttr(Gfx **dls, SObj *sobj)
+             {
+                 if (!(sLBCommonExternSpriteAttr & SP_TEXSHIFT))
+                 {
++#ifdef PORT
++                    gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_AVERAGE));
++#else
+                     gDPSetTextureFilter(dl++, G_TF_AVERAGE);
++#endif
+                 }
+             }
+             else if (sLBCommonExternSpriteAttr & SP_TEXSHIFT)
+             {
++#ifdef PORT
++                gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_BILERP));
++#else
+                 gDPSetTextureFilter(dl++, G_TF_BILERP);
++#endif
+             }
+         }
+     }
+@@ -3170,7 +3191,11 @@ void lbCommonStartSprite(Gfx **dls)
+     gDPSetBlendColor(dl++, 0x00, 0x00, 0x00, 0x08);
+     gDPSetAlphaCompare(dl++, G_AC_THRESHOLD);
+     gDPSetTexturePersp(dl++, G_TP_NONE);
++#ifdef PORT
++    gDPSetTextureFilter(dl++, port_force_2d_filter(G_TF_BILERP));
++#else
+     gDPSetTextureFilter(dl++, G_TF_BILERP);
++#endif
+     gDPSetTextureConvert(dl++, G_TC_FILT);
+     gDPSetTextureDetail(dl++, G_TD_CLAMP);
+     gDPSetTextureLOD(dl++, G_TL_TILE);
+@@ -3206,6 +3231,20 @@ void lbCommonFinishSprite(Gfx **dls)
+     {
+         gDPSetTextureLUT(dl++, G_TT_NONE);
+     }
++#ifdef PORT
++    /* When the user opted into "Force None" filtering for 2D, the sprite
++     * emission sites above wrote G_TF_POINT into the RDP filter state via
++     * port_force_2d_filter().  That state is persistent and would bleed
++     * into any 3D draw that follows in the same frame (3D paths rely on
++     * the global default emitted once by syRdpResetSettings rather than
++     * re-setting the filter per draw).  Restore the canonical default
++     * here so 3D rendering continues to follow the global gTextureFilter
++     * CVar.  Cost: one extra GBI word per sprite block when forcing. */
++    if (port_force_2d_point_filter_enabled())
++    {
++        gDPSetTextureFilter(dl++, G_TF_BILERP);
++    }
++#endif
+     dls[0] = dl;
+ }
+ 

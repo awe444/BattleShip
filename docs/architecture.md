@@ -59,6 +59,30 @@ CMakeLists.txt
 ## Related Architecture Notes
 - `docs/netplay_architecture.md` — netplay input staging, prediction, saved input history, and the rollback input boundary
 
+## Rendering — per-element texture filter override
+
+The "Texture Filter" CVar (`gTextureFilter`) chosen in the Port Settings menu
+sets the libultraship-wide default sampling mode (None / Linear / Three-Point).
+LUS already honours an explicit `gsDPSetTextureFilter(G_TF_POINT)` from the
+display list as a hard override — point filtering from the DL takes precedence
+over the CVar in every backend (`libultraship/src/fast/backends/gfx_*.cpp`).
+
+The port leverages that to keep HUD, menus, sprites, and other 2D elements
+crisp regardless of the global filter:
+
+- `port/render/force_point_filter.{h,cpp}` exposes `port_force_2d_filter(orig)`,
+  which returns `G_TF_POINT` when the user has the new `gTextureFilter2D` CVar
+  in "Force None" mode (default), or returns the original N64 filter unchanged
+  in "Match Global" mode.
+- `decomp/src/lb/lbcommon.c` routes its 5 sprite-path `gDPSetTextureFilter`
+  calls (in `lbCommonStartSprite` and `lbCommonPrepSObjAttr`) through the
+  helper, under `#ifdef PORT`. Mirrored as `port/decomp-patches/lbcommon-force-2d-point-filter.patch`.
+- 3D rendering paths (fighters, stages, items, particles) never call the helper
+  and so continue to follow the global Texture Filter CVar.
+
+Adding more 2D opt-ins later only requires routing additional `gDPSetTextureFilter`
+sites through `port_force_2d_filter()`.
+
 ## What NOT to Include in Port
 - `decomp/src/ovl8/`, `decomp/src/db/` — Debug overlay/menu (kept on the
   `port-patches` branch of the decomp submodule only as headers transitively
