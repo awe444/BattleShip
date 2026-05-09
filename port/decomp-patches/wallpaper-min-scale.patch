@@ -1,0 +1,206 @@
+--- a/src/gr/grwallpaper.c
++++ b/src/gr/grwallpaper.c
+@@ -13,6 +13,33 @@
+ extern int atoi(const char *nptr);
+ #endif
+ 
++#ifdef PORT
++/* Stage wallpapers are 300x220 in a 320x240 frame.  The original game
++ * authored them inset by 10 px on every side so the visible image fit
++ * inside the CRT-overscan-safe region (see
++ * docs/bugs/overscan_inset_strip_2026-05-08.md for the parallel
++ * camera/scissor/fade fixes).  On modern flat-panel displays we render
++ * the full 320x240 viewport, which leaves the original 10 px wallpaper
++ * border unfilled (black, sometimes flickering with stale framebuffer
++ * contents on stages whose engine wallpaper doesn't otherwise cover
++ * those pixels).  Enforce a minimum wallpaper zoom large enough to
++ * cover the entire frame even when the camera is fully zoomed out:
++ *
++ *     scale >= max(320/300, 240/220) = max(1.0667, 1.0909) ~= 1.0909
++ *
++ * Round up slightly for a hair of safety against rounding.  The engine
++ * already routinely zooms wallpapers between 1.004x and 2.0x when
++ * players spread out, so this floor is well within the existing
++ * dynamic range and has no observable cost. */
++#define PORT_WALLPAPER_MIN_SCALE  1.10F
++#define PORT_WALLPAPER_NATIVE_W   300.0F
++#define PORT_WALLPAPER_NATIVE_H   220.0F
++/* Centered top-left position for a wallpaper at PORT_WALLPAPER_MIN_SCALE
++ * inside the 320x240 frame: ((320 - 300*1.10)/2, (240 - 220*1.10)/2). */
++#define PORT_WALLPAPER_MIN_POS_X  (-5.0F)
++#define PORT_WALLPAPER_MIN_POS_Y  (-1.0F)
++#endif
++
+ // // // // // // // // // // // //
+ //                               //
+ //   GLOBAL / STATIC VARIABLES   //
+@@ -40,7 +67,16 @@
+     gsDPSetCycleType(G_CYC_FILL),
+     gsDPSetRenderMode(G_RM_NOOP, G_RM_NOOP2),
+     gsDPSetFillColor(GPACK_FILL16(GPACK_RGBA5551(0x00, 0x00, 0x00, 0x01))),
++#ifdef PORT
++    /* Clear the full 320x240 viewport.  The original (10,10)-(310,230)
++     * extents matched the CRT-overscan-safe inset (see header comment);
++     * leaving the 10 px borders uncleared on PORT showed stale
++     * framebuffer contents on Race to the Finish (the only stage that
++     * relies on this fill: grWallpaperMakeBonus3). */
++    gsDPFillRectangle(0, 0, GS_SCREEN_WIDTH_DEFAULT, GS_SCREEN_HEIGHT_DEFAULT),
++#else
+     gsDPFillRectangle(10, 10, 310, 230), // 10 less than width and height?
++#endif
+     gsDPPipeSync(),
+     gsDPSetCycleType(G_CYC_1CYCLE),
+     gsDPSetRenderMode(G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2),
+@@ -87,10 +123,19 @@
+     }
+     scale = 20000.0F / (mag + 8000.0F);
+ 
++#ifdef PORT
++    /* Floor enforces full-frame coverage; see PORT_WALLPAPER_MIN_SCALE
++     * comment near the top of the file. */
++    if (scale < PORT_WALLPAPER_MIN_SCALE)
++    {
++        scale = PORT_WALLPAPER_MIN_SCALE;
++    }
++#else
+     if (scale < 1.004F)
+     {
+         scale = 1.004F;
+     }
++#endif
+     else if (scale > 2.0F)
+     {
+         scale = 2.0F;
+@@ -104,6 +149,42 @@
+     pos_x = bak_pos_x = ((angle.y / F_CST_DTOR32(180.0F)) * width) - ((width - 320.0F) * 0.5F);      // Ultra64 default width  is 320px
+     pos_y = bak_pos_y = ((-angle.x / F_CST_DTOR32(180.0F)) * height) - ((height - 240.0F) * 0.5F);   // Ultra64 default height is 240px
+ 
++#ifdef PORT
++    /* Pan-clamp boundary: original 10 px CRT-overscan inset relaxed to
++     * the actual frame edges so the wallpaper can reach all 320x240
++     * pixels.  See PORT_WALLPAPER_MIN_SCALE comment near top of file. */
++    {
++        f32 inset_x = 0.0F;
++        f32 inset_y = 0.0F;
++
++        if (bak_pos_x > inset_x)
++        {
++            pos_x = inset_x;
++        }
++        else
++        {
++            neg = (-width - inset_x) + 320.0F;
++
++            if (bak_pos_x < neg)
++            {
++                pos_x = neg;
++            }
++        }
++        if (bak_pos_y > inset_y)
++        {
++            pos_y = inset_y;
++        }
++        else
++        {
++            neg = (-height - inset_y) + 240.0F;
++
++            if (bak_pos_y < neg)
++            {
++                pos_y = neg;
++            }
++        }
++    }
++#else
+     if (bak_pos_x > 10.0F)
+     {
+         pos_x = 10.0F;
+@@ -130,6 +211,7 @@
+             pos_y = neg;
+         }
+     }
++#endif
+     wallpaper_sobj->pos.x = pos_x;
+     wallpaper_sobj->pos.y = pos_y;
+ }
+@@ -235,11 +317,22 @@
+     );
+     wallpaper_sobj = SObjGetStruct(wallpaper_gobj);
+ 
++#ifdef PORT
++    /* Centered position for PORT_WALLPAPER_MIN_SCALE; CalcPersp will
++     * recompute on the next process tick anyway, but this avoids a
++     * single-frame top-left-corner flash before the first update. */
++    wallpaper_sobj->pos.x = PORT_WALLPAPER_MIN_POS_X;
++    wallpaper_sobj->pos.y = PORT_WALLPAPER_MIN_POS_Y;
++
++    wallpaper_sobj->sprite.attr = SP_TEXSHUF;
++    wallpaper_sobj->sprite.scalex = wallpaper_sobj->sprite.scaley = PORT_WALLPAPER_MIN_SCALE;
++#else
+     wallpaper_sobj->pos.x = 10.0F;
+     wallpaper_sobj->pos.y = 10.0F;
+ 
+     wallpaper_sobj->sprite.attr = SP_TEXSHUF;
+     wallpaper_sobj->sprite.scalex = wallpaper_sobj->sprite.scaley = 1.004F;
++#endif
+ }
+ 
+ // 0x801048F8
+@@ -265,11 +358,24 @@
+     );
+     wallpaper_sobj = SObjGetStruct(wallpaper_gobj);
+ 
++#ifdef PORT
++    /* No per-frame update for static wallpapers (Yoster Island, Yoster
++     * Small, all bonus stages, 1P Training Mode), so the minimum scale
++     * has to be baked in here.  SP_FASTCOPY uses the RDP COPY cycle,
++     * which can't scale; mvopening*.c does the same `&= ~SP_FASTCOPY`
++     * dance whenever it bumps wallpaper scale above 1.0. */
++    wallpaper_sobj->pos.x = PORT_WALLPAPER_MIN_POS_X;
++    wallpaper_sobj->pos.y = PORT_WALLPAPER_MIN_POS_Y;
++
++    wallpaper_sobj->sprite.attr = SP_TEXSHUF;
++    wallpaper_sobj->sprite.scalex = wallpaper_sobj->sprite.scaley = PORT_WALLPAPER_MIN_SCALE;
++#else
+     wallpaper_sobj->pos.x = 10.0F;
+     wallpaper_sobj->pos.y = 10.0F;
+ 
+     wallpaper_sobj->sprite.attr = SP_TEXSHUF | SP_FASTCOPY;
+     wallpaper_sobj->sprite.scalex = wallpaper_sobj->sprite.scaley = 1.0F;
++#endif
+ }
+ 
+ // 0x80104998
+@@ -292,10 +398,17 @@
+     {
+         temp = 20000.0F / (sqrt + 10000.0F);
+ 
++#ifdef PORT
++        if (temp < PORT_WALLPAPER_MIN_SCALE)
++        {
++            temp = PORT_WALLPAPER_MIN_SCALE;
++        }
++#else
+         if (temp < 1.004F)
+         {
+             temp = 1.004F;
+         }
++#endif
+         else if (temp > 2.0F)
+         {
+             temp = 2.0F;
+@@ -323,8 +436,15 @@
+ 
+     wallpaper_sobj = lbCommonMakeSObjForGObj(wallpaper_gobj, (Sprite*)PORT_RESOLVE(gMPCollisionGroundData->wallpaper));
+ 
++#ifdef PORT
++    /* Centered initial position; SectorProcUpdate will recompute next
++     * tick, but this avoids a one-frame top-left flash. */
++    wallpaper_sobj->pos.x = PORT_WALLPAPER_MIN_POS_X;
++    wallpaper_sobj->pos.y = PORT_WALLPAPER_MIN_POS_Y;
++#else
+     wallpaper_sobj->pos.x = 10.0F;
+     wallpaper_sobj->pos.y = 10.0F;
++#endif
+ 
+     wallpaper_sobj->sprite.attr = SP_TEXSHUF;
+ 
