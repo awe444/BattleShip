@@ -44,6 +44,16 @@ int port_force_2d_point_filter_enabled(void);
 /* Returns G_TF_POINT when forcing is enabled, else the original filter. */
 int port_force_2d_filter(int n64_filter);
 
+/* Counter-based passthrough scope.  Specific sprite-library callers (stage
+ * wallpapers, the title-screen animated fire texture) want their pixels to
+ * follow the global texture-filter CVar like 3D geometry does, even when
+ * the user has selected "Force None" for the 2D filter.  Pushing increments
+ * a counter which makes both port_force_2d_point_filter_enabled() and
+ * port_force_2d_filter() behave as if forcing were disabled; popping
+ * decrements it.  Calls must be balanced (push/pop pairs may nest). */
+void port_force_2d_filter_push_passthrough(void);
+void port_force_2d_filter_pop_passthrough(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
