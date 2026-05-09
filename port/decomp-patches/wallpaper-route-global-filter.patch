@@ -1,6 +1,6 @@
 --- a/src/gr/grwallpaper.c
 +++ b/src/gr/grwallpaper.c
-@@ -38,6 +38,23 @@
+@@ -38,6 +38,33 @@
   * inside the 320x240 frame: ((320 - 300*1.10)/2, (240 - 220*1.10)/2). */
  #define PORT_WALLPAPER_MIN_POS_X  (-5.0F)
  #define PORT_WALLPAPER_MIN_POS_Y  (-1.0F)
@@ -9,7 +9,14 @@
 + * which (when the user opted into "Force None" for the 2D filter) would
 + * otherwise force point-filtering on them.  Wallpapers should follow the
 + * global texture-filter CVar like the rest of the 3D scene, so we register
-+ * a small bracketing wrapper in place of lbCommonDrawSObjAttr. */
++ * a small bracketing wrapper in place of lbCommonDrawSObjAttr.
++ *
++ * The include-once guard makes this block idempotent if the patch ever
++ * ends up applied more than once on a tree (defense-in-depth — the
++ * configure-time `patch -p1 -N` already detects duplicates, but a stale
++ * checkout that has been hand-edited may slip past). */
++#ifndef PORT_GRWALLPAPER_DRAW_CB_DEFINED
++#define PORT_GRWALLPAPER_DRAW_CB_DEFINED 1
 +extern void port_force_2d_filter_push_passthrough(void);
 +extern void port_force_2d_filter_pop_passthrough(void);
 +static void port_grWallpaperDrawSObjAttr(GObj *gobj)
@@ -19,12 +26,15 @@
 +    port_force_2d_filter_pop_passthrough();
 +}
 +#define WALLPAPER_DRAW_CB port_grWallpaperDrawSObjAttr
++#endif /* PORT_GRWALLPAPER_DRAW_CB_DEFINED */
 +#else
++#ifndef WALLPAPER_DRAW_CB
 +#define WALLPAPER_DRAW_CB lbCommonDrawSObjAttr
++#endif
  #endif
  
  // // // // // // // // // // // //
-@@ -306,7 +323,7 @@
+@@ -306,7 +333,7 @@
          NULL,
          nGCCommonLinkIDWallpaper,
          GOBJ_PRIORITY_DEFAULT,
@@ -33,7 +43,7 @@
          0,
          GOBJ_PRIORITY_DEFAULT,
          ~0,
-@@ -347,7 +364,7 @@
+@@ -347,7 +374,7 @@
          NULL, 
          nGCCommonLinkIDWallpaper,
          GOBJ_PRIORITY_DEFAULT, 
@@ -42,7 +52,7 @@
          0, 
          GOBJ_PRIORITY_DEFAULT, 
          -1, 
-@@ -432,7 +449,7 @@
+@@ -432,7 +459,7 @@
  
      sGRWallpaperGObj = wallpaper_gobj = gcMakeGObjSPAfter(nGCCommonKindWallpaper, NULL, nGCCommonLinkIDWallpaper, GOBJ_PRIORITY_DEFAULT);
  
