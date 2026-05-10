@@ -1727,10 +1727,10 @@ static bool sprite_reloc_tokens_plausible(const uint32_t *w)
 
 // True when a non-zero token fails resolve but rotate16 fixes it for the
 // *current* table generation and the raw high bits are NOT a normal stale
-// token generation (>= TOKEN_GENERATION_MIN 0x080). That pattern is the
+// token generation (>= TOKEN_GENERATION_MIN 0x100). That pattern is the
 // pass1 half-swap / fresh-ROM-at-reused-address case.
 //
-// Do NOT treat plain stale tokens (old gen in 0x080..0xFFF) as heap reuse:
+// Do NOT treat plain stale tokens (old gen in 0x100..0xFFF) as heap reuse:
 // re-running rotate16 on u16 fields would double-fix already-native LE data
 // after portRelocResetPointerTable bumps generation (menus look corrupted).
 static bool sprite_has_heap_reuse_halfswapped_tokens(const uint32_t *w)
@@ -1743,7 +1743,7 @@ static bool sprite_has_heap_reuse_halfswapped_tokens(const uint32_t *w)
 		{
 			continue;
 		}
-		if ((t >> 20) >= 0x080u)
+		if ((t >> 20) >= 0x100u)
 		{
 			continue;
 		}
@@ -1769,7 +1769,7 @@ static bool bitmap_has_heap_reuse_halfswapped_buf_token(const uint32_t *w)
 	{
 		return false;
 	}
-	if ((t >> 20) >= 0x080u)
+	if ((t >> 20) >= 0x100u)
 	{
 		return false;
 	}

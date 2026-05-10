@@ -9,12 +9,36 @@
  * Index 0 is reserved (NULL token). Valid indices start at 1.
  *
  * Token layout: [12 bits generation][20 bits index]
- *   - 4096 generations before wrap (vs the previous 128, which a long
- *     classic-mode session can blow through in under an hour — at which
- *     point a stale token whose generation byte coincidentally re-matches
- *     resolves through the current table and returns whatever pointer
- *     happens to live at that index now). 4096 generations is days of
- *     continuous play — effectively infinite for real users.
+ *   - Generation range [0x100..0xFFF] = 3840 generations before wrap.
+ *     Days of continuous play — effectively infinite for real users.
+ *
+ *     The MIN of 0x100 (not 0x080 or 0x001) is load-bearing: it ensures
+ *     the top BYTE of every emitted token, `(token >> 24)`, is always
+ *     >= 0x10. libultraship's `Interpreter::SegAddr` (fast/interpreter.cpp)
+ *     falls back from `portRelocTryResolvePointer` to a classic N64
+ *     segmented-address decode whenever the resolve returns NULL:
+ *
+ *         segNum = (uint32_t)(w1 >> 24);
+ *         if (segNum < MAX_SEGMENT_POINTERS && mSegmentPointers[segNum])
+ *             return mSegmentPointers[segNum] + (w1 & 0x00FFFFFF);
+ *
+ *     MAX_SEGMENT_POINTERS is 16 (0x10).  SSB64 binds segment 0xE every
+ *     frame to the graphics heap, so any stale/NULL-resolving token whose
+ *     top byte landed in [0x00..0x0F] would be silently aliased to
+ *     `gSYTaskmanGraphicsHeap.ptr + low24(token)` instead of failing
+ *     loudly.  The 8/24 layout we used originally happened to satisfy
+ *     this invariant by construction (gen lived in 0x80..0xFF, top byte
+ *     == gen).  When we widened to 12/20 the top byte became `gen >> 4`,
+ *     which can dip into the 0x00..0x0F segment-pointer range whenever
+ *     gen lands in 0x000..0x0FF — producing visible menu-graphics
+ *     corruption on long sessions and after libultraship started
+ *     evicting cached display-list widenings on every reloc-file load
+ *     (forces re-resolution through the current generation, which makes
+ *     every transient NULL-resolve land in SegAddr's fallback).
+ *
+ *     Keep `TOKEN_GENERATION_MIN >= (MAX_SEGMENT_POINTERS << 4)` whenever
+ *     touching either the layout or libultraship's segment table size.
+ *
  *   - 1M indices per scene. Old layout allowed 16M; real measurements
  *     show typical usage well under 100K, so 1M leaves 10x headroom.
  *     Anything that registers >1M tokens in a single scene needs a real
@@ -24,16 +48,19 @@
  * capped at TOKEN_INDEX_MASK (1M).
  */
 
-static void **sPointerTable = nullptr;
-static uint32_t sNextIndex = 1;
-static uint32_t sCapacity = 0;
-static uint32_t sGeneration = 0x080;
-
 static constexpr uint32_t INITIAL_CAPACITY = 256 * 1024;
 static constexpr uint32_t TOKEN_GENERATION_SHIFT = 20;
 static constexpr uint32_t TOKEN_INDEX_MASK = 0x000FFFFF;     // 20 bits = 1M-1
 static constexpr uint32_t TOKEN_GENERATION_MAX = 0xFFF;      // 12 bits
-static constexpr uint32_t TOKEN_GENERATION_MIN = 0x080;
+// Must satisfy (TOKEN_GENERATION_MIN >> 4) >= MAX_SEGMENT_POINTERS (= 16) so
+// that (token >> 24) never falls inside libultraship's segment-pointer table.
+// See header comment above for the full rationale.
+static constexpr uint32_t TOKEN_GENERATION_MIN = 0x100;
+
+static void **sPointerTable = nullptr;
+static uint32_t sNextIndex = 1;
+static uint32_t sCapacity = 0;
+static uint32_t sGeneration = TOKEN_GENERATION_MIN;
 
 static void ensureCapacity(void)
 {
