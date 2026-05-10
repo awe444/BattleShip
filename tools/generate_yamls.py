@@ -252,13 +252,27 @@ def get_main_motion_name(file_id):
 # ============================================================================
 
 def parse_reloc_data_header(header_path):
-    """Parse include/reloc_data.h to build file_id -> (symbol_name, clean_name) map."""
+    """Parse include/reloc_data.h to build file_id -> (symbol_name, clean_name) map.
+
+    Skips lines flagged ``/* STUBBED */`` by ``generate_reloc_stubs.py`` —
+    those defines exist only because the symbol is referenced from src/ but
+    absent from ``tools/reloc_data_symbols.us.txt``, and the placeholder value
+    is always ``0``. Treating them as real entries lets the last STUBBED
+    ``ll*FileID`` parsed clobber whichever real file the symbols table assigns
+    to file_id 0 (historically ``MNCommon``), which then mis-routes the file
+    through the ``reloc_animations/FT*`` figatree halfword-swap path and
+    corrupts the embedded sprite reloc tokens. See
+    docs/bugs/menu_relocfile_id0_collision_2026-05-10.md.
+    """
     id_to_name = {}
     pattern = re.compile(r'#define\s+(ll(\w+)FileID)\s+\(\(intptr_t\)(0x[0-9a-fA-F]+|[0-9]+)\)')
 
     with open(header_path, 'r') as f:
         for line in f:
-            m = pattern.match(line.strip())
+            stripped = line.strip()
+            if "STUBBED" in stripped:
+                continue
+            m = pattern.match(stripped)
             if m:
                 symbol = m.group(1)   # e.g. llMNCommonFileID
                 name = m.group(2)     # e.g. MNCommon
