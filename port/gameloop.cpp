@@ -270,10 +270,10 @@ static void diag_init_once(void)
 {
 	if (sDLDiagEnabled >= 0) return;
 	const char *env;
-	sDLDiagEnabled = 1;
+	sDLDiagEnabled = 0;
 	env = std::getenv("SSB64_DL_DIAG");
-	if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) {
-		sDLDiagEnabled = 0;
+	if (env && !(env[0] == '0' || env[0] == 'n' || env[0] == 'N')) {
+		sDLDiagEnabled = 1;
 	}
 	env = std::getenv("SSB64_DL_DIAG_MS");
 	if (env) {
