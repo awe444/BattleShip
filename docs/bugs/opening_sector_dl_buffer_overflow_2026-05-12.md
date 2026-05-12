@@ -88,7 +88,7 @@ All retained diagnostics live in `port/gameloop.cpp` — the decomp submodule ha
 - Optional taskman submission log (`SSB64_DL_DIAG_LOG_TASKMAN=1`) — dumps `gSYTaskmanDLHeads[0..3]` and `sSYTaskmanDLBranches[0..3]` per submit.
 - "DLBuffer OVERFLOW" line from `decomp/src/sys/taskman.c::syTaskmanCheckBufferLengths` (existing decomp PORT branch, not added by this fix) — fires whenever any DL buffer's `head` advances past `start + length`, with the kind / used / alloc / start / head fields.
 
-The diagnostics fire only when `SSB64_DL_DIAG` is set in the environment; default release builds get the same per-frame cost as before this investigation.
+The diagnostics are opt-in: they fire only when `SSB64_DL_DIAG=1` (or any non-zero value) is set in the environment. Default builds get exactly the same per-frame cost as before this investigation — no overhead unless the env var is present.
 
 ## Audit hook
 

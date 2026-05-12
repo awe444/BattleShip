@@ -202,16 +202,17 @@ static int sLastDLLoadBytes = 0;
  *
  * Instrumentation hooks into the existing gbi_trace_callback (one call per
  * GBI opcode inside the Fast3D interpreter loop), so it has zero cost when
- * tracing is off (callback unset) and adds a handful of integer ops per
- * opcode when on. Logging is guarded by thresholds with env overrides so
- * normal runs are quiet.
+ * diagnostics are off (default) and adds a handful of integer ops per opcode
+ * when on. Diagnostics are opt-in: they are disabled unless SSB64_DL_DIAG is
+ * set. Logging is guarded by thresholds with env overrides so normal runs
+ * are quiet.
  *
+ *   SSB64_DL_DIAG=1            enable all DL diagnostics (required; off by default)
  *   SSB64_DL_DIAG_MS=N         log if a DL submit takes more than N ms (default 200)
  *   SSB64_DL_DIAG_OPS=N        log if a DL processes more than N opcodes (default 200000)
  *   SSB64_DL_DIAG_HEARTBEAT=N  inside the interpreter, log every N opcodes
  *                              processed within one submit (default 0 = off;
  *                              try 1000000 if you suspect an infinite DL loop)
- *   SSB64_DL_DIAG=0            disable all of the above
  */
 static int sDLDiagEnabled       = -1;
 static int sDLDiagSlowMs        = 200;
@@ -771,8 +772,8 @@ extern "C" void port_submit_display_list(void *dl)
 	{
 		static int sLogTaskman = -1;
 		if (sLogTaskman < 0) {
-			const char *e = getenv("SSB64_DL_DIAG_LOG_TASKMAN");
-			sLogTaskman = (e != nullptr && e[0] != '\0' && atoi(e) != 0) ? 1 : 0;
+			const char *e = std::getenv("SSB64_DL_DIAG_LOG_TASKMAN");
+			sLogTaskman = (e != nullptr && e[0] != '\0' && std::atoi(e) != 0) ? 1 : 0;
 		}
 		if (sLogTaskman) {
 			for (int i = 0; i < 4; i++) {
