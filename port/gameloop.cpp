@@ -721,43 +721,46 @@ extern "C" void port_submit_display_list(void *dl)
 	/* Begin trace frame before Fast3D processes the display list */
 	gbi_trace_begin_frame();
 
-	/* Reset per-DL diagnostic accumulators. The opcode counter / histogram
-	 * are written from the trace callback (one entry per opcode) while the
-	 * interpreter walks the DL below, so they must be cleared just before
-	 * the Fast3D call. */
-	sDLOpCount = 0;
-	sDLOpHeartbeatNext = sDLDiagHeartbeatOps > 0 ? (uint64_t)sDLDiagHeartbeatOps : UINT64_MAX;
-	sDLFirstOpcode = 0xFF;
-	sDLLastW0 = 0;
-	sDLLastW1 = 0;
-	sDLMaxDepth = 0;
-	for (int i = 0; i < 256; i++) sDLOpHist[i] = 0;
-	for (int i = 0; i < kDLRingSize; i++) sDLRing[i] = {};
-	sDLRingHead = 0;
-	for (int i = 0; i < kDLCallTargets; i++) sDLCalls[i] = {};
-	sDLCallTotal = 0;
-	sDLPushCount = 0;
-	sDLPopCount  = 0;
-	sDLPushLogged = 0;
-	sDLRootPtr = (uintptr_t)dl;
-	/* Best-effort read of root DL first command. dl is typed Gfx*; we
-	 * read raw 8 bytes to extract opcode + w0 + w1. The host pointer
-	 * may be from heap-built DL memory and should be readable; if not,
-	 * we'll just see zeros (root_op=0x00 in the log). */
-	{
-		/* Runtime F3DGfx.words has two uintptr_t fields, so on LP64 hosts
-		 * w0/w1 are 8 bytes each. We just need the opcode (top byte of
-		 * w0) and the two words for the log; memcpy avoids strict-
-		 * aliasing issues. */
-		const uint8_t *p = reinterpret_cast<const uint8_t *>(dl);
-		uintptr_t w0u = 0, w1u = 0;
-		std::memcpy(&w0u, p, sizeof(uintptr_t));
-		std::memcpy(&w1u, p + sizeof(uintptr_t), sizeof(uintptr_t));
-		sDLRootW0 = (uint64_t)w0u;
-		sDLRootW1 = (uint64_t)w1u;
-		sDLRootOpcode = (uint8_t)((w0u >> 24) & 0xFFu);
+	/* Reset per-DL diagnostic accumulators only when diagnostics are
+	 * enabled. The opcode counter / histogram are written from the trace
+	 * callback (one entry per opcode) while the interpreter walks the DL
+	 * below, so they must be cleared just before the Fast3D call when
+	 * diagnostic collection is active. */
+	if (sDLDiagEnabled) {
+		sDLOpCount = 0;
+		sDLOpHeartbeatNext = sDLDiagHeartbeatOps > 0 ? (uint64_t)sDLDiagHeartbeatOps : UINT64_MAX;
+		sDLFirstOpcode = 0xFF;
+		sDLLastW0 = 0;
+		sDLLastW1 = 0;
+		sDLMaxDepth = 0;
+		for (int i = 0; i < 256; i++) sDLOpHist[i] = 0;
+		for (int i = 0; i < kDLRingSize; i++) sDLRing[i] = {};
+		sDLRingHead = 0;
+		for (int i = 0; i < kDLCallTargets; i++) sDLCalls[i] = {};
+		sDLCallTotal = 0;
+		sDLPushCount = 0;
+		sDLPopCount  = 0;
+		sDLPushLogged = 0;
+		sDLRootPtr = (uintptr_t)dl;
+		/* Best-effort read of root DL first command. dl is typed Gfx*; we
+		 * read raw 8 bytes to extract opcode + w0 + w1. The host pointer
+		 * may be from heap-built DL memory and should be readable; if not,
+		 * we'll just see zeros (root_op=0x00 in the log). */
+		{
+			/* Runtime F3DGfx.words has two uintptr_t fields, so on LP64 hosts
+			 * w0/w1 are 8 bytes each. We just need the opcode (top byte of
+			 * w0) and the two words for the log; memcpy avoids strict-
+			 * aliasing issues. */
+			const uint8_t *p = reinterpret_cast<const uint8_t *>(dl);
+			uintptr_t w0u = 0, w1u = 0;
+			std::memcpy(&w0u, p, sizeof(uintptr_t));
+			std::memcpy(&w1u, p + sizeof(uintptr_t), sizeof(uintptr_t));
+			sDLRootW0 = (uint64_t)w0u;
+			sDLRootW1 = (uint64_t)w1u;
+			sDLRootOpcode = (uint8_t)((w0u >> 24) & 0xFFu);
+		}
+		sDLSubmitSeq++;
 	}
-	sDLSubmitSeq++;
 
 	/* Optional: log taskman buffer state for the upcoming submission so we
 	 * can correlate slot numbers in the runaway dump back to which buffer
