@@ -15,9 +15,15 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>  // _exit
+#endif
 
 #include "resource/RelocFile.h"
 #include "resource/RelocFileTable.h"
@@ -143,6 +149,23 @@ static void portRelocEvictFileRangesInRange(void *base, size_t size)
 		sPortRelocFileRanges.end());
 }
 
+/* Called by syTaskmanStartTask before reusing the scene arena for the next
+ * scene. Evicts every port-side cache that may hold a pointer into the old
+ * arena's contents (DL widening, texture upload, struct fixup, reloc file
+ * ranges) so a stale lookup can't resolve through prior-scene state. Same
+ * eviction APIs run per-relocFile-load in port_reloc_lb_load_request. */
+extern "C" void port_taskman_evict_arena_caches(const void *base, size_t size)
+{
+	if ((base == nullptr) || (size == 0)) return;
+	extern void portPackedDisplayListCacheDeleteRange(const void *base, size_t size);
+	extern void portTextureCacheDeleteRange(const void *base, size_t size);
+	extern void portEvictStructFixupsInRange(const void *base, size_t size);
+	portPackedDisplayListCacheDeleteRange(base, size);
+	portTextureCacheDeleteRange(base, size);
+	portEvictStructFixupsInRange(base, size);
+	portRelocEvictFileRangesInRange(const_cast<void *>(base), size);
+}
+
 static bool portRelocIsFighterFigatreeFile(u32 file_id)
 {
 	static const char sFighterAnimPrefix[] = "reloc_animations/FT";
@@ -216,6 +239,63 @@ static std::shared_ptr<RelocFile> portLoadRelocResource(u32 file_id)
 
 	if (!resource)
 	{
+		/* Catch the "stale BattleShip.o2r" failure mode visibly before the
+		 * caller dereferences this NULL and SIGSEGVs deep in portFixupSprite.
+		 *
+		 * When a user upgrades the port across an asset-format bump (e.g.
+		 * factory version 0 vs 3), their cached BattleShip.o2r is silently
+		 * incompatible: every RELO resource fails to load with "GetFactory
+		 * failed to find an import factory" deep inside libultraship, but
+		 * we only see NULL here. A healthy run loads thousands of reloc
+		 * resources — the first one failing means the archive is unusable.
+		 *
+		 * Print an actionable message and exit cleanly rather than crash
+		 * minutes later in a non-obvious place. */
+		static bool sExitedOnStaleArchive = false;
+		if (!sExitedOnStaleArchive)
+		{
+			sExitedOnStaleArchive = true;
+			std::string dataDirO2r =
+			    Ship::Context::GetPathRelativeToAppDirectory("BattleShip.o2r");
+			fprintf(stderr,
+			    "\n"
+			    "============================================================\n"
+			    "SSB64 PC port: failed to load asset from BattleShip.o2r\n"
+			    "  resource: %s\n"
+			    "  file_id:  %u\n"
+			    "============================================================\n"
+			    "\n"
+			    "This almost always means your cached BattleShip.o2r was\n"
+			    "packed by an older build whose resource format doesn't\n"
+			    "match this binary's registered factory version.\n"
+			    "\n"
+			    "Fix: delete the stale archive and re-launch — the binary\n"
+			    "will re-extract assets from your baserom on first run.\n"
+			    "\n"
+			    "    rm \"%s\"\n"
+			    "\n"
+			    "If that doesn't help, check ssb64.log for the underlying\n"
+			    "ResourceLoader 'GetFactory failed' error which names the\n"
+			    "exact Format/Version mismatch.\n"
+			    "============================================================\n"
+			    "\n",
+			    path.c_str(), file_id, dataDirO2r.c_str());
+			port_log("SSB64: STALE BattleShip.o2r detected — first reloc load failed "
+			         "(path=%s file_id=%u). Delete '%s' and re-launch to re-extract.\n",
+			         path.c_str(), file_id, dataDirO2r.c_str());
+			std::fflush(stderr);
+			/* _exit(0): skip C++ static destructors and spdlog flush so the
+			 * Linux desktop doesn't show a "fatal error" popup. The exit
+			 * code is intentionally 0 — the meaningful failure signal is
+			 * the message we just printed; a non-zero code triggers
+			 * crash-reporter UI on some desktops (Fedora/GNOME). Use POSIX
+			 * _exit on POSIX, _Exit (stdlib) as a portable fallback. */
+#if defined(__unix__) || defined(__APPLE__)
+			_exit(0);
+#else
+			std::_Exit(0);
+#endif
+		}
 		spdlog::error("lbReloc bridge: failed to load '{}' (file_id={})", path, file_id);
 		return nullptr;
 	}
