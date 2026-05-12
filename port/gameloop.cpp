@@ -30,8 +30,10 @@
 #include <fast/Fast3dWindow.h>
 #include <fast/interpreter.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,6 +63,23 @@ extern "C" int portFastCaptureBackbufferPNG(const char *path);
 extern "C" void port_vi_simulate_vblank(void);
 
 extern "C" void lbBackupApplyCheats(void);
+
+/* Taskman DL buffer state — declared in decomp/src/sys/taskman.c.  Used by
+ * the kill-switch dump below to label per-frame buffer extents in the log
+ * without an extra layer of accessors in the decomp submodule.
+ * `SYTaskmanDLBuffer` is the matching layout from decomp/src/sys/taskman.h
+ * (Gfx *start; u32 length) — re-declared here to avoid pulling the full
+ * decomp header into the port C++ TU. */
+struct SYTaskmanDLBuffer_t {
+	Gfx     *start;
+	uint32_t length;
+};
+extern "C" {
+extern Gfx                 *gSYTaskmanDLHeads[4];
+extern Gfx                 *sSYTaskmanDLBranches[4];
+extern SYTaskmanDLBuffer_t  sSYTaskmanDLBuffers[2][4];
+extern int                  gSYTaskmanTaskID;
+}
 
 /* ========================================================================= */
 /*  External game symbols (C linkage)                                        */
@@ -168,12 +187,335 @@ static int sLastDLTris = 0;
 static int sLastDLRectPx = 0;
 static int sLastDLLoadBytes = 0;
 
+/* ---------- Per-DL hang diagnostics ----------------------------------------
+ *
+ * Goal: when a DL submit is suspiciously slow (the watchdog has been firing
+ * after ~3.5s on a single coroutine resume inside the scheduler thread), log
+ * enough information from inside the interpreter to distinguish:
+ *
+ *   (a) one DL whose interpreter walk takes seconds (huge DL, deep recursion,
+ *       or genuinely infinite loop via a bad branch / circular DL),
+ *   (b) the scheduler-tick coroutine submitting many DLs back-to-back
+ *       without yielding,
+ *   (c) Fast3D internal slowness (GPU sync, shader compile stall, etc.) where
+ *       opcode count is small but wall time is large.
+ *
+ * Instrumentation hooks into the existing gbi_trace_callback (one call per
+ * GBI opcode inside the Fast3D interpreter loop), so it has zero cost when
+ * tracing is off (callback unset) and adds a handful of integer ops per
+ * opcode when on. Logging is guarded by thresholds with env overrides so
+ * normal runs are quiet.
+ *
+ *   SSB64_DL_DIAG_MS=N         log if a DL submit takes more than N ms (default 200)
+ *   SSB64_DL_DIAG_OPS=N        log if a DL processes more than N opcodes (default 200000)
+ *   SSB64_DL_DIAG_HEARTBEAT=N  inside the interpreter, log every N opcodes
+ *                              processed within one submit (default 0 = off;
+ *                              try 1000000 if you suspect an infinite DL loop)
+ *   SSB64_DL_DIAG=0            disable all of the above
+ */
+static int sDLDiagEnabled       = -1;
+static int sDLDiagSlowMs        = 200;
+static int sDLDiagSlowOps       = 200000;
+static int sDLDiagHeartbeatOps  = 0;
+int        sDLDiagKillDepth     = 0;  /* extern-linked from kill-switch above */
+static uint64_t sDLOpCount      = 0;
+static uint64_t sDLOpHeartbeatNext = 0;
+static uint32_t sDLOpHist[256]  = {0};
+static uint8_t  sDLFirstOpcode  = 0xFF;
+static uint64_t sDLLastW0       = 0;
+static uint64_t sDLLastW1       = 0;
+static int      sDLMaxDepth     = 0;
+static uint32_t sDLSubmitSeq    = 0;
+
+/* Ring buffer of the most recent (opcode, w0, w1) tuples seen by the trace
+ * callback in the current DL. On a hang we dump this to see what opcode
+ * pattern keeps repeating. Size is a power of two for cheap masking. */
+static constexpr int kDLRingSize = 32;
+struct DLRingEntry {
+	uint64_t w0;
+	uint64_t w1;
+	int      depth;
+	uint8_t  opcode;
+};
+static DLRingEntry sDLRing[kDLRingSize] = {0};
+static int sDLRingHead = 0;
+/* Tally of G_DL-class call opcodes by (w1 target). Tracks up to 16 distinct
+ * targets per DL — small table is enough because a runaway cycle by
+ * definition revisits a tiny number of addresses. */
+static constexpr int kDLCallTargets = 16;
+struct DLCallTally {
+	uint64_t target;
+	uint32_t count;
+};
+static DLCallTally sDLCalls[kDLCallTargets] = {0};
+static uint32_t sDLCallTotal = 0;
+/* Push (G_DL call/branch) and pop (G_ENDDL) op counters for the current DL.
+ * A runaway recursion looks like push >> pop. F3DEX2 end-DL = 0xDF, F3D/F3DEX
+ * end-DL = 0xB8 (both reach the same gfx_end_dl_handler_common). */
+static uint32_t sDLPushCount = 0;
+static uint32_t sDLPopCount  = 0;
+/* Root pointer (cast to uintptr_t) for the current DL submit, plus its
+ * first opcode and w1. Helpful to identify which game DL kicked off the
+ * runaway. */
+static uintptr_t sDLRootPtr     = 0;
+static uint8_t   sDLRootOpcode  = 0xFF;
+static uint64_t  sDLRootW0      = 0;
+static uint64_t  sDLRootW1      = 0;
+/* When depth crosses a threshold, log the first few G_DL-class pushes so we
+ * can see exactly which (caller, target) pairs are building the runaway. */
+static uint32_t sDLPushLogged   = 0;
+static constexpr uint32_t kDLPushLogMax = 24;
+
+static void diag_init_once(void)
+{
+	if (sDLDiagEnabled >= 0) return;
+	const char *env;
+	sDLDiagEnabled = 1;
+	env = std::getenv("SSB64_DL_DIAG");
+	if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) {
+		sDLDiagEnabled = 0;
+	}
+	env = std::getenv("SSB64_DL_DIAG_MS");
+	if (env) {
+		int v = std::atoi(env);
+		if (v >= 0) sDLDiagSlowMs = v;
+	}
+	env = std::getenv("SSB64_DL_DIAG_OPS");
+	if (env) {
+		int v = std::atoi(env);
+		if (v >= 0) sDLDiagSlowOps = v;
+	}
+	env = std::getenv("SSB64_DL_DIAG_HEARTBEAT");
+	if (env) {
+		int v = std::atoi(env);
+		if (v >= 0) sDLDiagHeartbeatOps = v;
+	}
+	env = std::getenv("SSB64_DL_DIAG_KILL_DEPTH");
+	if (env) {
+		int v = std::atoi(env);
+		if (v >= 0) sDLDiagKillDepth = v;
+	}
+	if (sDLDiagEnabled) {
+		port_log("SSB64: DL hang diagnostics enabled — slow_ms=%d slow_ops=%d heartbeat_ops=%d kill_depth=%d\n",
+		         sDLDiagSlowMs, sDLDiagSlowOps, sDLDiagHeartbeatOps, sDLDiagKillDepth);
+	}
+}
+
+/* Forward decl: defined further down so we can use it from the callback. */
+static void diag_log_top_opcodes(void);
+
 /* Thin C wrapper for the trace callback (matches GbiTraceCallbackFn signature) */
 static void gbi_trace_callback(uintptr_t w0, uintptr_t w1, int dl_depth)
 {
 	gbi_trace_log_cmd((unsigned long long)w0, (unsigned long long)w1, dl_depth);
 
 	uint8_t opcode = (uint8_t)((w0 >> 24) & 0xFFu);
+
+	if (sDLDiagEnabled) {
+		if (sDLOpCount == 0) sDLFirstOpcode = opcode;
+		sDLOpCount++;
+		sDLOpHist[opcode]++;
+		sDLLastW0 = (uint64_t)w0;
+		sDLLastW1 = (uint64_t)w1;
+		if (dl_depth > sDLMaxDepth) sDLMaxDepth = dl_depth;
+
+		/* Ring of recent commands. */
+		sDLRing[sDLRingHead].w0     = (uint64_t)w0;
+		sDLRing[sDLRingHead].w1     = (uint64_t)w1;
+		sDLRing[sDLRingHead].depth  = dl_depth;
+		sDLRing[sDLRingHead].opcode = opcode;
+		sDLRingHead = (sDLRingHead + 1) & (kDLRingSize - 1);
+
+		/* Track G_DL-class call/branch opcodes by target so we can pinpoint
+		 * a runaway recursion cycle. Opcodes:
+		 *   0xDE = G_DL                 (vanilla F3D / F3DEX / F3DEX2)
+		 *   0xDC = G_DL_OTR_HASH        (LUS expanded — 128-bit; w1 = upper)
+		 *   0xDB = G_DL_OTR_FILEPATH
+		 *   0xDA = G_DL_INDEX           (LUS port packed-DL index call)
+		 * For a cycle we mostly care about which target keeps recurring,
+		 * so use w1 as the key. */
+		if (opcode == 0xDE || opcode == 0xDC || opcode == 0xDB || opcode == 0xDA) {
+			sDLCallTotal++;
+			sDLPushCount++;
+			uint64_t key = (uint64_t)w1;
+			int slot = -1, free_slot = -1;
+			for (int i = 0; i < kDLCallTargets; i++) {
+				if (sDLCalls[i].count != 0 && sDLCalls[i].target == key) { slot = i; break; }
+				if (free_slot < 0 && sDLCalls[i].count == 0) free_slot = i;
+			}
+			if (slot < 0 && free_slot >= 0) {
+				sDLCalls[free_slot].target = key;
+				sDLCalls[free_slot].count  = 0;
+				slot = free_slot;
+			}
+			if (slot >= 0) sDLCalls[slot].count++;
+
+			/* Eagerly log the first kDLPushLogMax G_DL-class pushes once
+			 * the stack is clearly deeper than any sane game DL nesting.
+			 * Includes the no-push (branch) flag from w0 bit 16 so we can
+			 * tell call vs branch. */
+			if (dl_depth > 200 && sDLPushLogged < kDLPushLogMax) {
+				int branch_flag = (int)((w0 >> 16) & 1u);
+				port_log("SSB64: DL push#%u op=0x%02X %s depth=%d target=0x%llX w0=0x%llX\n",
+				         (unsigned)sDLPushLogged,
+				         (unsigned)opcode,
+				         branch_flag ? "BRANCH" : "CALL",
+				         dl_depth,
+				         (unsigned long long)w1,
+				         (unsigned long long)w0);
+				/* On the very first eager log, also dump 64 bytes (8
+				 * 8-byte commands at LP64) of memory at the branch target
+				 * so we can decode the body of the runaway DL.
+				 * Memory is potentially garbage; we trust it because Fast3D
+				 * has been dereferencing it for thousands of iterations,
+				 * but guard against obvious bad pointers. */
+				if (sDLPushLogged == 1 && w1 > 0x10000 && w1 < 0x00007FFFFFFFFFFFull) {
+					const uint8_t *p = reinterpret_cast<const uint8_t *>((uintptr_t)w1);
+					char hexbuf[3 * 64 + 16];
+					int hoff = 0;
+					for (int i = 0; i < 64 && hoff < (int)sizeof(hexbuf) - 4; i++) {
+						hoff += std::snprintf(hexbuf + hoff, sizeof(hexbuf) - hoff,
+						                     "%02X%s", p[i], (i % 8 == 7) ? "  " : " ");
+					}
+					port_log("SSB64: DL branch-target hexdump @0x%llX: %s\n",
+					         (unsigned long long)w1, hexbuf);
+				}
+				sDLPushLogged++;
+			}
+		} else if (opcode == 0xDF || opcode == 0xB8) {
+			/* G_ENDDL (F3DEX2 / F3D respectively). */
+			sDLPopCount++;
+		}
+
+		/* Kill switch: if the DL call stack grows past a sane cap, abort
+		 * the submit by throwing — port_submit_display_list catches it
+		 * gracefully so the rest of the frame can proceed. Default off;
+		 * set SSB64_DL_DIAG_KILL_DEPTH=10000 (or similar) to engage. */
+		extern int sDLDiagKillDepth; /* defined just below */
+		if (sDLDiagKillDepth > 0 && dl_depth >= sDLDiagKillDepth) {
+			port_log("SSB64: DL kill-switch firing at depth=%d (cap=%d) "
+			         "ops=%llu submit=%u pushes=%u pops=%u root=0x%llX root_op=0x%02X\n",
+			         dl_depth, sDLDiagKillDepth,
+			         (unsigned long long)sDLOpCount,
+			         (unsigned)sDLSubmitSeq,
+			         sDLPushCount, sDLPopCount,
+			         (unsigned long long)sDLRootPtr,
+			         (unsigned)sDLRootOpcode);
+
+			/* Identify the runaway loop's entry point by scanning the ring
+			 * for the most recent 0xDE BRANCH (no-push).  That's the slot
+			 * the runtime is stuck branching to — sDLCalls only tracks
+			 * the first 16 unique branch targets and fills up before the
+			 * runaway begins, so it's not reliable for this purpose. */
+			uintptr_t loopTarget = 0;
+			for (int s = 0; s < kDLRingSize; s++) {
+				int idx = (sDLRingHead - 1 - s + kDLRingSize) & (kDLRingSize - 1);
+				if (sDLRing[idx].opcode == 0xDE
+				    && (int)((sDLRing[idx].w0 >> 16) & 1u) == 1) {
+					loopTarget = (uintptr_t)sDLRing[idx].w1;
+					break;
+				}
+			}
+			if (loopTarget > 0x10000 && loopTarget < 0x00007FFFFFFFFFFFull) {
+				constexpr int kHostCmdSize = 16; /* uintptr_t w0; uintptr_t w1; */
+				constexpr int kDumpCmds   = 64;
+				constexpr int kPreCmds    = 8;
+				const uint8_t *base = reinterpret_cast<const uint8_t *>(
+				    loopTarget - (uintptr_t)kPreCmds * kHostCmdSize);
+				port_log("SSB64: DL kill-switch dump @ loop_target=0x%llX "
+				         "(showing %d cmds starting %d before target)\n",
+				         (unsigned long long)loopTarget,
+				         kDumpCmds, kPreCmds);
+				/* Also log buffer 0's base/length so slot math is easy
+				 * to do off the raw addresses in the dump below. */
+				int tid = gSYTaskmanTaskID;
+				if (tid < 0 || tid >= 2) tid = 0; /* defensive clamp */
+				port_log("SSB64: DL kill-switch buffer0 start=%p len=%u "
+				         "head[0]=%p head[1]=%p branches[0]=%p branches[1]=%p\n",
+				         (void *)sSYTaskmanDLBuffers[tid][0].start,
+				         (unsigned)sSYTaskmanDLBuffers[tid][0].length,
+				         (void *)gSYTaskmanDLHeads[0],
+				         (void *)gSYTaskmanDLHeads[1],
+				         (void *)sSYTaskmanDLBranches[0],
+				         (void *)sSYTaskmanDLBranches[1]);
+				for (int c = 0; c < kDumpCmds; c++) {
+					const uint8_t *p = base + (size_t)c * kHostCmdSize;
+					uintptr_t cw0 = 0, cw1 = 0;
+					std::memcpy(&cw0, p,                 sizeof(uintptr_t));
+					std::memcpy(&cw1, p + sizeof(uintptr_t), sizeof(uintptr_t));
+					int rel = c - kPreCmds;
+					uint8_t op = (uint8_t)((cw0 >> 24) & 0xFFu);
+					int push_bit = (int)((cw0 >> 16) & 1u);
+					port_log("SSB64: DL kill-switch dump  [%+3d] addr=%p "
+					         "op=0x%02X b1=0x%02X w0=0x%016llX w1=0x%016llX\n",
+					         rel, (const void*)p, op, push_bit,
+					         (unsigned long long)cw0, (unsigned long long)cw1);
+				}
+			}
+
+			throw std::runtime_error("DL kill-switch: runaway display list");
+		}
+
+		if (sDLDiagHeartbeatOps > 0 && sDLOpCount >= sDLOpHeartbeatNext) {
+			port_log("SSB64: DL heartbeat submit=%u ops=%llu depth=%d last_op=0x%02X w0=0x%llX w1=0x%llX\n",
+			         (unsigned)sDLSubmitSeq,
+			         (unsigned long long)sDLOpCount,
+			         dl_depth,
+			         (unsigned)opcode,
+			         (unsigned long long)w0,
+			         (unsigned long long)w1);
+			sDLOpHeartbeatNext = sDLOpCount + (uint64_t)sDLDiagHeartbeatOps;
+
+			/* Once the call stack has clearly run away, dump the call-target
+			 * tally and the recent-command ring so we can identify which DL
+			 * is recursing. Threshold is intentionally low (>500) — normal
+			 * SSB64 DL nesting tops out around 10–20. */
+			if (dl_depth > 500) {
+				/* Find top 4 call targets by count. */
+				int top[4] = {-1, -1, -1, -1};
+				for (int i = 0; i < kDLCallTargets; i++) {
+					if (sDLCalls[i].count == 0) continue;
+					for (int t = 0; t < 4; t++) {
+						if (top[t] < 0 || sDLCalls[i].count > sDLCalls[top[t]].count) {
+							for (int s = 3; s > t; s--) top[s] = top[s - 1];
+							top[t] = i;
+							break;
+						}
+					}
+				}
+				char buf[512];
+				int off = std::snprintf(buf, sizeof(buf),
+				    "SSB64: DL runaway depth=%d ops=%llu submit=%u pushes=%u pops=%u "
+				    "root=0x%llX root_op=0x%02X root_w0=0x%llX root_w1=0x%llX top_targets=[",
+				    dl_depth, (unsigned long long)sDLOpCount,
+				    (unsigned)sDLSubmitSeq, sDLPushCount, sDLPopCount,
+				    (unsigned long long)sDLRootPtr,
+				    (unsigned)sDLRootOpcode,
+				    (unsigned long long)sDLRootW0,
+				    (unsigned long long)sDLRootW1);
+				for (int t = 0; t < 4 && top[t] >= 0 && off < (int)sizeof(buf) - 48; t++) {
+					off += std::snprintf(buf + off, sizeof(buf) - off, "%s0x%llX=%u",
+					                     t == 0 ? "" : " ",
+					                     (unsigned long long)sDLCalls[top[t]].target,
+					                     sDLCalls[top[t]].count);
+				}
+				std::snprintf(buf + off, sizeof(buf) - off, "]");
+				port_log("%s\n", buf);
+
+				/* Dump the ring of recent commands (oldest to newest). */
+				port_log("SSB64: DL recent commands (oldest→newest):\n");
+				for (int i = 0; i < kDLRingSize; i++) {
+					int idx = (sDLRingHead + i) & (kDLRingSize - 1);
+					port_log("  [%2d] op=0x%02X depth=%d w0=0x%llX w1=0x%llX\n",
+					         i, (unsigned)sDLRing[idx].opcode,
+					         sDLRing[idx].depth,
+					         (unsigned long long)sDLRing[idx].w0,
+					         (unsigned long long)sDLRing[idx].w1);
+				}
+			}
+		}
+	}
+
 	switch (opcode) {
 	/* SSB64 ucode is F3DEX2 (gsp.fifo). Tri opcodes are 0x05/0x06/0x07,
 	 * NOT F3DEX's 0xBF/0xB1/0xB5 — confirmed by histogram showing 0x05
@@ -213,6 +555,44 @@ static void gbi_trace_callback(uintptr_t w0, uintptr_t w1, int dl_depth)
 	default:
 		break;
 	}
+}
+
+/* Print the top-K opcodes from the per-DL histogram, plus the first/last
+ * opcode and recursion depth. Async-unsafe (uses port_log → fprintf); only
+ * called from the slow-DL post-mortem path on the scheduler thread. */
+static void diag_log_top_opcodes(void)
+{
+	struct Pair { uint32_t count; uint8_t opcode; };
+	Pair top[8];
+	int top_n = 0;
+	for (int i = 0; i < 256; i++) {
+		uint32_t c = sDLOpHist[i];
+		if (c == 0) continue;
+		if (top_n < 8) {
+			top[top_n++] = { c, (uint8_t)i };
+		} else {
+			int min_idx = 0;
+			for (int j = 1; j < 8; j++) if (top[j].count < top[min_idx].count) min_idx = j;
+			if (c > top[min_idx].count) top[min_idx] = { c, (uint8_t)i };
+		}
+	}
+	/* Sort top[] descending by count via insertion sort (n<=8). */
+	for (int i = 1; i < top_n; i++) {
+		Pair k = top[i];
+		int j = i - 1;
+		while (j >= 0 && top[j].count < k.count) {
+			top[j + 1] = top[j];
+			j--;
+		}
+		top[j + 1] = k;
+	}
+	char buf[256];
+	int off = 0;
+	for (int i = 0; i < top_n && off < (int)sizeof(buf) - 24; i++) {
+		off += std::snprintf(buf + off, sizeof(buf) - off, "%s0x%02X=%u",
+		                     i == 0 ? "" : " ", top[i].opcode, top[i].count);
+	}
+	port_log("SSB64: DL top_opcodes [%s]\n", buf);
 }
 
 /* Called by osSpTaskStartGo after Fast3D has processed the DL. Returns
@@ -314,6 +694,7 @@ extern "C" void port_submit_display_list(void *dl)
 		gbi_trace_init();
 		gfx_set_trace_callback(gbi_trace_callback);
 	}
+	diag_init_once();
 
 	/* Reset per-DL accumulators before Fast3D walks the DL. */
 	sFrameTriCount = 0;
@@ -340,6 +721,68 @@ extern "C" void port_submit_display_list(void *dl)
 	/* Begin trace frame before Fast3D processes the display list */
 	gbi_trace_begin_frame();
 
+	/* Reset per-DL diagnostic accumulators. The opcode counter / histogram
+	 * are written from the trace callback (one entry per opcode) while the
+	 * interpreter walks the DL below, so they must be cleared just before
+	 * the Fast3D call. */
+	sDLOpCount = 0;
+	sDLOpHeartbeatNext = sDLDiagHeartbeatOps > 0 ? (uint64_t)sDLDiagHeartbeatOps : UINT64_MAX;
+	sDLFirstOpcode = 0xFF;
+	sDLLastW0 = 0;
+	sDLLastW1 = 0;
+	sDLMaxDepth = 0;
+	for (int i = 0; i < 256; i++) sDLOpHist[i] = 0;
+	for (int i = 0; i < kDLRingSize; i++) sDLRing[i] = {};
+	sDLRingHead = 0;
+	for (int i = 0; i < kDLCallTargets; i++) sDLCalls[i] = {};
+	sDLCallTotal = 0;
+	sDLPushCount = 0;
+	sDLPopCount  = 0;
+	sDLPushLogged = 0;
+	sDLRootPtr = (uintptr_t)dl;
+	/* Best-effort read of root DL first command. dl is typed Gfx*; we
+	 * read raw 8 bytes to extract opcode + w0 + w1. The host pointer
+	 * may be from heap-built DL memory and should be readable; if not,
+	 * we'll just see zeros (root_op=0x00 in the log). */
+	{
+		/* Runtime F3DGfx.words has two uintptr_t fields, so on LP64 hosts
+		 * w0/w1 are 8 bytes each. We just need the opcode (top byte of
+		 * w0) and the two words for the log; memcpy avoids strict-
+		 * aliasing issues. */
+		const uint8_t *p = reinterpret_cast<const uint8_t *>(dl);
+		uintptr_t w0u = 0, w1u = 0;
+		std::memcpy(&w0u, p, sizeof(uintptr_t));
+		std::memcpy(&w1u, p + sizeof(uintptr_t), sizeof(uintptr_t));
+		sDLRootW0 = (uint64_t)w0u;
+		sDLRootW1 = (uint64_t)w1u;
+		sDLRootOpcode = (uint8_t)((w0u >> 24) & 0xFFu);
+	}
+	sDLSubmitSeq++;
+
+	/* Optional: log taskman buffer state for the upcoming submission so we
+	 * can correlate slot numbers in the runaway dump back to which buffer
+	 * the renderer wrote. Triggered by SSB64_DL_DIAG_LOG_TASKMAN=1. Only
+	 * dumps the first command at each buffer's `branch` and `head` so we
+	 * can see whether the per-frame init or per-camera advance landed
+	 * where we expected. */
+	{
+		static int sLogTaskman = -1;
+		if (sLogTaskman < 0) {
+			const char *e = getenv("SSB64_DL_DIAG_LOG_TASKMAN");
+			sLogTaskman = (e != nullptr && e[0] != '\0' && atoi(e) != 0) ? 1 : 0;
+		}
+		if (sLogTaskman) {
+			for (int i = 0; i < 4; i++) {
+				port_log("SSB64: DL submit#%u taskman[%d] head=%p branches=%p\n",
+				         (unsigned)sDLSubmitSeq, i,
+				         (void *)gSYTaskmanDLHeads[i],
+				         (void *)sSYTaskmanDLBranches[i]);
+			}
+		}
+	}
+
+	auto dl_start = std::chrono::steady_clock::now();
+
 	std::unordered_map<Mtx *, MtxF> mtxReplacements;
 	try {
 		window->DrawAndRunGraphicsCommands(static_cast<Gfx *>(dl), mtxReplacements);
@@ -353,6 +796,9 @@ extern "C" void port_submit_display_list(void *dl)
 		return;
 	}
 
+	auto dl_end = std::chrono::steady_clock::now();
+	uint64_t dl_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(dl_end - dl_start).count();
+
 	sDLSubmitsThisFrame++;
 
 	/* End trace frame after processing */
@@ -364,6 +810,32 @@ extern "C" void port_submit_display_list(void *dl)
 	sLastDLTris = sFrameTriCount;
 	sLastDLRectPx = sFrameRectPx;
 	sLastDLLoadBytes = sFrameLoadBytes;
+
+	if (sDLDiagEnabled) {
+		bool slow_time = sDLDiagSlowMs >= 0 && dl_ms >= (uint64_t)sDLDiagSlowMs;
+		bool slow_ops  = sDLDiagSlowOps >= 0 && sDLOpCount >= (uint64_t)sDLDiagSlowOps;
+		if (slow_time || slow_ops) {
+			extern unsigned char port_diag_get_scene_curr(void);
+			extern const char *port_diag_get_scene_name(unsigned char);
+			unsigned char scene = port_diag_get_scene_curr();
+			port_log("SSB64: SLOW DL submit=%u ms=%llu ops=%llu max_depth=%d "
+			         "first_op=0x%02X last_w0=0x%llX last_w1=0x%llX tri=%d rect_px=%d "
+			         "scene=%u(%s) submits_this_frame=%d\n",
+			         (unsigned)sDLSubmitSeq,
+			         (unsigned long long)dl_ms,
+			         (unsigned long long)sDLOpCount,
+			         sDLMaxDepth,
+			         (unsigned)sDLFirstOpcode,
+			         (unsigned long long)sDLLastW0,
+			         (unsigned long long)sDLLastW1,
+			         sFrameTriCount,
+			         sFrameRectPx,
+			         (unsigned)scene,
+			         port_diag_get_scene_name(scene),
+			         sDLSubmitsThisFrame);
+			diag_log_top_opcodes();
+		}
+	}
 }
 
 /* ========================================================================= */
@@ -397,9 +869,69 @@ static void port_android_early_init_sdl_gamecontroller(void)
 }
 #endif
 
+/* ---- Per-scene SYTaskmanSetup overrides (port-side, no submodule edits) ----
+ *
+ * Some N64-authored scene taskman setups allocate DL buffers that are
+ * tight to the byte on real hardware but tip into overflow on the PC
+ * port (where the port-specific scissor widening in syRdpSetViewport
+ * lets a few more bitmap tiles per sprite pass the cull).  Overflowing
+ * a DL buffer overwrites its trailing gSPEndDisplayList terminator, and
+ * because Fast3D's GfxExecStack::branch pushes nullptr sentinels on
+ * every non-push branch, the interpreter walks leftover sprite-tile
+ * commands past the buffer end indefinitely — exhausting its stack and
+ * stalling the game coroutine (watchdog SIGUSR1 ~3 s later).
+ *
+ * Each entry below names the offending scene-setup symbol and the
+ * corrected buffer size.  Run once before any scene loads.
+ *
+ * See docs/bugs/opening_sector_dl_buffer_overflow_2026-05-12.md for the
+ * full root-cause writeup of the OpeningSector case.  Adding more
+ * entries: identify the symbol by checking
+ * `mv*TaskmanSetup` / `sc*TaskmanSetup` / etc. in the offending scene's
+ * source; the symbol is global (`D` in nm output) on the port, so an
+ * extern declaration + field write is all that's needed. */
+
+/* Layout prefix of decomp's `SYTaskmanSceneSetup`, copied verbatim from
+ * decomp/src/sys/taskman.h up to the field we need to write.  Declaring
+ * this locally instead of #including the decomp header keeps the port
+ * TU isolated from the rest of the decomp's C-only definitions; only the
+ * write to `dl_buffer0_size` matters and a static_assert pins the field
+ * offset so a future struct reshuffle in decomp can't silently break us. */
+struct PortTaskmanScenePrefix {
+	uint16_t flags;
+	void   (*func_update)(void);
+	void   (*func_draw)(void);
+	void    *arena_start;
+	size_t   arena_size;
+	int32_t  taskgfx_num;
+	int32_t  contexts_num;
+	size_t   dl_buffer0_size; /* the field we patch */
+};
+static_assert(offsetof(PortTaskmanScenePrefix, dl_buffer0_size) == 48,
+              "SYTaskmanSceneSetup layout drift — recheck taskman.h before patching");
+
+static void port_patch_taskman_setups(void)
+{
+	/* `mvOpeningSectorTaskmanSetup` is the global SYTaskmanSetup in
+	 * decomp/src/mv/mvopening/mvopeningsector.c.  Its first member is a
+	 * SYTaskmanSceneSetup, so reinterpreting as PortTaskmanScenePrefix
+	 * lets us write `dl_buffer0_size` directly. */
+	extern PortTaskmanScenePrefix mvOpeningSectorTaskmanSetup;
+
+	const size_t newSize = sizeof(Gfx) * 10000;
+	mvOpeningSectorTaskmanSetup.dl_buffer0_size = newSize;
+
+	port_log("SSB64: PortGameInit — bumped mvOpeningSectorTaskmanSetup.dl_buffer0_size to %zu bytes (~%zu GBI slots)\n",
+	         newSize, newSize / sizeof(Gfx));
+}
+
 void PortGameInit(void)
 {
 	port_log("SSB64: PortGameInit — initializing coroutine system\n");
+
+	/* Per-scene Taskman buffer-size patches.  Must run before
+	 * syTaskmanStartTask is called for any scene that we override. */
+	port_patch_taskman_setups();
 
 	/* Convert the main thread to a fiber so it can participate in
 	 * coroutine switching. */
