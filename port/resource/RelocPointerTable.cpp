@@ -180,11 +180,6 @@ void *portRelocTryResolvePointer(uint32_t token)
     return sSlots[index].ptr;
 }
 
-uint32_t portRelocTokenTableGeneration(void)
-{
-	return sGeneration;
-}
-
 /**
  * Selectively invalidate slots whose pointer falls in [base, base+size).
  * Each invalidated slot has its ptr cleared and gen bumped; the slot

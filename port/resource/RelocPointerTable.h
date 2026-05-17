@@ -44,9 +44,6 @@ void *portRelocResolvePointerDebug(uint32_t token, const char *file, int line);
  */
 void *portRelocTryResolvePointer(uint32_t token);
 
-/** Current token-table generation (top bits of valid tokens). */
-uint32_t portRelocTokenTableGeneration(void);
-
 /**
  * Reset the token table (hard wipe — clears all slots, resets free list).
  *
