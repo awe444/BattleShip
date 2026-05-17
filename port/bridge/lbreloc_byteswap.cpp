@@ -1735,7 +1735,6 @@ static bool sprite_reloc_tokens_plausible(const uint32_t *w)
 // after portRelocResetPointerTable bumps generation (menus look corrupted).
 static bool sprite_has_heap_reuse_halfswapped_tokens(const uint32_t *w)
 {
-	const uint32_t curGen = portRelocTokenTableGeneration();
 	const uint32_t slots[] = { w[8], w[13], w[14], w[15] };
 	for (uint32_t t : slots)
 	{
@@ -1748,7 +1747,7 @@ static bool sprite_has_heap_reuse_halfswapped_tokens(const uint32_t *w)
 			continue;
 		}
 		const uint32_t swapped = (t << 16) | (t >> 16);
-		if ((swapped >> 20) == curGen && portRelocTryResolvePointer(swapped) != nullptr)
+		if (portRelocTryResolvePointer(swapped) != nullptr)
 		{
 			return true;
 		}
@@ -1773,9 +1772,8 @@ static bool bitmap_has_heap_reuse_halfswapped_buf_token(const uint32_t *w)
 	{
 		return false;
 	}
-	const uint32_t curGen = portRelocTokenTableGeneration();
 	const uint32_t swapped = (t << 16) | (t >> 16);
-	return (swapped >> 20) == curGen && portRelocTryResolvePointer(swapped) != nullptr;
+	return portRelocTryResolvePointer(swapped) != nullptr;
 }
 
 extern "C" void portFixupSprite(void *sprite)

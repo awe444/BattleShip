@@ -94,6 +94,32 @@ if(SSB64_PORT_DECOMP_PATCHES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/decomp/src"
 endif()
 
 ################################################################################
+# Port patches to libultraship (no commits inside the submodule)
+################################################################################
+file(GLOB SSB64_PORT_LUS_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/port/libultraship-patches/*.patch")
+list(SORT SSB64_PORT_LUS_PATCHES)
+if(SSB64_PORT_LUS_PATCHES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libultraship/src")
+	if(NOT SSB64_PATCH_EXECUTABLE)
+		find_program(SSB64_PATCH_EXECUTABLE patch)
+	endif()
+	if(NOT SSB64_PATCH_EXECUTABLE)
+		message(FATAL_ERROR "GNU patch is required to apply port/libultraship-patches (install the 'patch' package).")
+	endif()
+	foreach(_ssb64_port_lus_patch IN LISTS SSB64_PORT_LUS_PATCHES)
+		execute_process(
+			COMMAND "${SSB64_PATCH_EXECUTABLE}" -p1 -N -i "${_ssb64_port_lus_patch}"
+			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/libultraship"
+			RESULT_VARIABLE _ssb64_port_lus_patch_rc
+			OUTPUT_QUIET
+			ERROR_VARIABLE _ssb64_port_lus_patch_err
+		)
+		if(_ssb64_port_lus_patch_rc GREATER 1)
+			message(FATAL_ERROR "Applying ${_ssb64_port_lus_patch} failed (exit ${_ssb64_port_lus_patch_rc}): ${_ssb64_port_lus_patch_err}")
+		endif()
+	endforeach()
+endif()
+
+################################################################################
 # libultraship configuration (set before add_subdirectory)
 ################################################################################
 
@@ -509,6 +535,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE libultraship)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+    target_link_libraries(${PROJECT_NAME} PRIVATE shell32)
     # DMA functions (osEPiStartDma, osPiStartDma) are provided by LUS.
     # Game DMA code is no-opped via #ifdef PORT in dma.c, so no /FORCE needed.
     target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
