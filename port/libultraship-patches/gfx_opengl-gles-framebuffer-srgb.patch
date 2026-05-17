@@ -1,0 +1,31 @@
+--- a/src/fast/backends/gfx_opengl.cpp
++++ b/src/fast/backends/gfx_opengl.cpp
+@@ -1289,9 +1289,11 @@ void GfxRenderingAPIOGL::DrawPostProcessPass(const PostProcessParams& params,
+     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+     glClear(GL_COLOR_BUFFER_BIT);
+ 
++#ifndef USE_OPENGLES // GL_FRAMEBUFFER_SRGB not in Android GLES headers
+     if (dstFbInfo.postProcessFormat == PostProcessFboFormat::Srgb) {
+         glEnable(GL_FRAMEBUFFER_SRGB);
+     }
++#endif
+ 
+     // Upload the chain-built UBO blob. The buffer was allocated at
+     // CreatePostProcessSlangProgram time so we just refill.
+@@ -1499,12 +1501,14 @@ void GfxRenderingAPIOGL::DrawPostProcessPass(const PostProcessParams& params,
+     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+     glClear(GL_COLOR_BUFFER_BIT);
+ 
++#ifndef USE_OPENGLES // GL_FRAMEBUFFER_SRGB not in Android GLES headers
+     // sRGB intermediate FBOs need GL_FRAMEBUFFER_SRGB enabled so the
+     // hardware encodes the fragment's linear output back to sRGB on
+     // write. For non-sRGB destinations the state is ignored by spec
+     // (encoding only happens when the attachment is sRGB-formatted),
+     // so we leave it enabled afterwards rather than thrashing state.
+     if (dstFbInfo.postProcessFormat == PostProcessFboFormat::Srgb) {
+         glEnable(GL_FRAMEBUFFER_SRGB);
+     }
++#endif
+ 
+     // Sample source FB's color texture on TU0. Filter + wrap mode come
+     // from the producer pass's libretro `filter_linearN` / `wrap_modeN`
